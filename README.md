@@ -8,7 +8,7 @@ It listens on `127.0.0.1` only, forwards requests to whitelisted hosts, blocks e
 
 ## Why
 
-Firewall the agent's Windows user to loopback only, and it has no network. Add the proxy, and it reaches exactly the `host:port` pairs you allow:
+Firewall the agent's Windows user to loopback only, and it has no network. Add the proxy, and it reaches only the `host:port` pairs you allow:
 
 ```
 agent (restricted user) ──► network-sandbox (127.0.0.1:8080) ──► api.anthropic.com:443  ✔
@@ -52,6 +52,7 @@ agent (restricted user) ──► network-sandbox (127.0.0.1:8080) ──► api
 port=8080                      # required, 1-65535
 logfile=network-sandbox.log    # optional; relative paths resolve next to the exe
 loglevel=info                  # optional: error | warn | info | debug
+privateaddresses=deny          # optional: deny | allow
 
 [whitelist]
 api.anthropic.com:443
@@ -72,6 +73,7 @@ Whitelist entries, one per line:
 - The port is required. To allow a host on both 80 and 443, list it twice.
 - Matching ignores case and a trailing dot.
 - A request for `github.com` never matches an IP entry, even if the name resolves to that IP.
+- A hostname entry connects to public addresses only. If the name resolves to a loopback, private or link-local address, the request gets `403`, so DNS can't point an allowed name at your machine or local network. For internal hosts, set `privateaddresses=allow`, which lifts this for all hostname entries. IP entries are always connected as written.
 - `#` or `;` start a comment.
 
 The proxy refuses to start on unknown keys, malformed entries or an empty whitelist. Config changes take effect after a restart.
@@ -90,14 +92,14 @@ network-sandbox.exe [start|stop|restart|status] [-config <path>]
 | `restart` | Stops and starts, e.g. after editing the config. |
 | `status` | Lists all running proxies with their PID, listen address and config. Exit code 0 if any runs, 3 if not. |
 
-`-help`, `-?` or `/?` shows all options. The default config is `network-sandbox.ini` next to the exe. The background proxy's PID is kept in a `.pid` file next to the config.
+`-help`, `-?` or `/?` shows all options. The default config is `network-sandbox.ini` next to the exe. The background proxy is recorded in `<config>.pid` next to the config, e.g. `network-sandbox.ini.pid`.
 
 Each config has its own proxy, so you can run several side by side on different ports. `start`, `stop` and `restart` act on the proxy of the given config. `status -config <path>` checks only that config's background proxy.
 
 ## What the agent sees
 
 - **Allowed:** the request goes through unchanged.
-- **Blocked:** `403 Forbidden` with the reason, e.g. `network-sandbox: example.com:443 not in whitelist`. Browsers show a generic tunnel error for blocked HTTPS instead.
+- **Blocked:** `403 Forbidden` with the reason, e.g. `network-sandbox: example.com:443 not in whitelist` or `... resolves to a non-public address`. Browsers show a generic tunnel error for blocked HTTPS instead.
 - **Target unreachable:** `502 Bad Gateway`.
 
 ## Logs
@@ -109,7 +111,9 @@ time=2026-09-30T06:23:36.019+02:00 level=INFO msg=request client=127.0.0.1:60273
 time=2026-09-30T06:23:36.200+02:00 level=INFO msg=request client=127.0.0.1:60278 method=CONNECT target=www.wikipedia.org:443 decision=deny status=403 bytes_up=0 bytes_down=0 duration=0s
 ```
 
-To find out which hosts a tool needs, run it through the proxy and look for `decision=deny`. With `loglevel=debug`, plain-HTTP requests also log their URL and headers, with credentials redacted.
+To find out which hosts a tool needs, run it through the proxy and look for `decision=deny`. With `loglevel=debug`, plain-HTTP requests also log their URL and headers. The URL is logged without user info and query string, and only a few harmless header values (such as `Content-Type` and `User-Agent`) are shown; a secret in the URL path would still be logged.
+
+The log rotates at 10 MB and keeps the three previous files (`.1` to `.3`), so it never takes more than 40 MB. Give each config its own `logfile`.
 
 ## Company networks with TLS inspection
 
@@ -133,7 +137,7 @@ Errors like `self-signed certificate in certificate chain` mean the tool is miss
 
 ## Trying it out
 
-- `./manual-tests.ps1` sends real requests through the built proxy with curl. It needs internet access.
+- `./demo.ps1` sends real requests through the built proxy with curl. It needs internet access.
 - To browse through the proxy with Edge, use a separate profile:
 
   ```powershell
@@ -150,15 +154,16 @@ The proxy contains an agent only together with these:
 - The agent runs as a separate, restricted Windows user.
 - Firewall rules allow that user loopback traffic only.
 - The proxy runs under a different account than the agent.
-- The agent user can't modify the exe, the config or the log file.
+- The agent user can't modify the exe, the config or the log files, and can't create files in the config's directory, which holds the PID file.
 
 ## Limitations
 
-- For HTTPS, the proxy controls only `host:port`, not paths or content.
+- For HTTPS, the proxy controls only `host:port`, not paths or content. It doesn't check the TLS server name either: where several sites share servers (a CDN), a tunnel to an allowed host can ask for another site on them.
 - Allowed hosts can still carry data out, e.g. by pushing to GitHub. Keep the whitelist short.
 - DNS lookups made directly through the Windows DNS service aren't covered.
 - Any local process can use the proxy; there is no authentication. It only ever grants whitelisted access.
-- No SOCKS, no UDP, no log rotation, no Windows service.
+- At most 256 connections at a time; further clients wait. A tunnel or transfer without traffic for 15 minutes is closed. A client can still use up these limits, or flood the log until older entries rotate out.
+- No SOCKS, no UDP, no Windows service.
 
 Full specification: [doc/spec.md](doc/spec.md).
 

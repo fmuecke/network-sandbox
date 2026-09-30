@@ -115,10 +115,7 @@ func run(args []string, stderr io.Writer) int {
 	case "stop":
 		return stop(path, stderr)
 	case "restart":
-		if code := stop(path, stderr); code != 0 {
-			return code
-		}
-		return start(path, stderr)
+		return restart(path, stderr)
 	case "status":
 		return status(path, stderr)
 	default:
@@ -145,10 +142,11 @@ func serve(configPath string, stderr io.Writer) int {
 	if err != nil {
 		return fail(stderr, err)
 	}
-	proxy := NewProxy(cfg.Whitelist, log)
+	proxy := NewProxy(cfg.Whitelist, cfg.AllowPrivate, log)
 	srv := &http.Server{
 		Handler:           proxy,
 		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       keepAliveTimeout,
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
 
@@ -159,7 +157,7 @@ func serve(configPath string, stderr io.Writer) int {
 		ln.Addr(), cfg.Whitelist.Len(), logFile.Name())
 
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.Serve(ln) }()
+	go func() { serveErr <- srv.Serve(newLimitListener(ln, maxConnections, idleTimeout)) }()
 	select {
 	case err := <-serveErr:
 		log.Error("server failed", "error", err)
@@ -190,12 +188,12 @@ func loadConfig(path string) (*Config, error) {
 	return cfg, err
 }
 
-func openLog(cfg *Config) (*os.File, error) {
+func openLog(cfg *Config) (*rotatingFile, error) {
 	path := cfg.LogFile
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(exeDir(), path)
 	}
-	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	return openRotatingFile(path, maxLogSize, logBackups)
 }
 
 func listenAddr(cfg *Config) string {

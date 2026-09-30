@@ -153,9 +153,37 @@ func TestBackgroundCommands(t *testing.T) {
 	expect("status", exitNotRunning, "not running")
 	expect("stop", 0, "not running")
 
-	// A stale PID file (here: our own, non-sandbox process) must not count as running.
-	os.WriteFile(pidFilePath(config), []byte(fmt.Sprint(os.Getpid())), 0o600)
+	// A stale PID file must not count as running: here, the PID now belongs to
+	// a process that was created at another time.
+	os.WriteFile(pidFilePath(config), []byte(fmt.Sprintf("%d 1\n", os.Getpid())), 0o600)
 	expect("status", exitNotRunning, "not running")
+	expect("stop", 0, "not running")
+
+	// Concurrent starts of one config must not both start a proxy.
+	codes := make(chan int)
+	for range 2 {
+		go func() {
+			code, _ := cmd("start")
+			codes <- code
+		}()
+	}
+	if a, b := <-codes, <-codes; a+b != 1 {
+		t.Errorf("concurrent starts: exit codes %d and %d, want one 0 and one 1", a, b)
+	}
+	expect("status", 0, "running (pid")
+	expect("stop", 0, "stopped (pid")
+	if _, err := os.Stat(pidFilePath(config) + ".lock"); !os.IsNotExist(err) {
+		t.Error("lock file left behind")
+	}
+}
+
+func TestPIDFilePath(t *testing.T) {
+	if pidFilePath(`C:\dir\policy.ini`) == pidFilePath(`C:\dir\policy.conf`) {
+		t.Error("configs that differ in the extension share a PID file")
+	}
+	if config := `C:\dir\policy.pid`; pidFilePath(config) == config {
+		t.Error("the PID file of a config named .pid is the config itself")
+	}
 }
 
 func TestCommandLineArgs(t *testing.T) {

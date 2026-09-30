@@ -14,10 +14,11 @@ import (
 )
 
 type Config struct {
-	Port      uint16
-	LogFile   string
-	LogLevel  slog.Level
-	Whitelist *Whitelist
+	Port         uint16
+	LogFile      string
+	LogLevel     slog.Level
+	AllowPrivate bool // hostname entries may resolve to non-public addresses
+	Whitelist    *Whitelist
 }
 
 var logLevels = map[string]slog.Level{
@@ -94,6 +95,14 @@ func ParseConfig(r io.Reader) (*Config, error) {
 					return nil, fmt.Errorf("line %d: loglevel must be error, warn, info or debug", n)
 				}
 				cfg.LogLevel = level
+			case "privateaddresses":
+				switch strings.ToLower(value) {
+				case "allow":
+					cfg.AllowPrivate = true
+				case "deny":
+				default:
+					return nil, fmt.Errorf("line %d: privateaddresses must be deny or allow", n)
+				}
 			default:
 				return nil, fmt.Errorf("line %d: unknown key %q", n, key)
 			}

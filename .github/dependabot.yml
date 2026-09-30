@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 Florian Mücke
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# The workflow pins actions to commit SHAs; Dependabot proposes the updates.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

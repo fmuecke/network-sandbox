@@ -15,7 +15,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -23,7 +22,7 @@ import (
 )
 
 // Background mode: "start" launches this executable detached from the console
-// and records its PID next to the config; "stop" terminates that process.
+// and records the process next to the config; "stop" terminates that process.
 // There is deliberately no network control endpoint: the agent could use it.
 
 const (
@@ -33,7 +32,10 @@ const (
 	processQueryLimitedInformation = 0x1000
 	processCommandLineInformation  = 60
 	tcpTableOwnerPIDListener       = 3
+	fileFlagDeleteOnClose          = 0x04000000
+	errorSharingViolation          = syscall.Errno(32)
 	startTimeout                   = 5 * time.Second
+	lockTimeout                    = 30 * time.Second
 )
 
 var (
@@ -43,8 +45,59 @@ var (
 )
 
 func start(configPath string, stderr io.Writer) int {
-	if pid, _ := runningPID(configPath); pid != 0 {
-		return fail(stderr, fmt.Errorf("already running (pid %d)", pid))
+	return locked(configPath, stderr, startBackground)
+}
+
+func stop(configPath string, stderr io.Writer) int {
+	return locked(configPath, stderr, stopBackground)
+}
+
+func restart(configPath string, stderr io.Writer) int {
+	return locked(configPath, stderr, func(configPath string, stderr io.Writer) int {
+		if code := stopBackground(configPath, stderr); code != 0 {
+			return code
+		}
+		return startBackground(configPath, stderr)
+	})
+}
+
+// locked runs a command while no other start, stop or restart of the same
+// config runs. Otherwise two of them could both find no proxy and start one,
+// or act on a PID file that the other is about to replace.
+func locked(configPath string, stderr io.Writer, command func(string, io.Writer) int) int {
+	// The lock is a file that is held open without sharing. Windows deletes it
+	// when the handle closes, also if this process dies.
+	lockFile := pidFilePath(configPath) + ".lock"
+	name, err := syscall.UTF16PtrFromString(lockFile)
+	if err != nil {
+		return fail(stderr, err)
+	}
+	deadline := time.Now().Add(lockTimeout)
+	for {
+		h, err := syscall.CreateFile(name, syscall.GENERIC_WRITE, 0, nil, syscall.OPEN_ALWAYS,
+			syscall.FILE_ATTRIBUTE_NORMAL|fileFlagDeleteOnClose, 0)
+		if err == nil {
+			defer syscall.CloseHandle(h)
+			return command(configPath, stderr)
+		}
+		if err != errorSharingViolation {
+			return fail(stderr, fmt.Errorf("cannot lock %s: %w", lockFile, err))
+		}
+		if time.Now().After(deadline) {
+			return fail(stderr, fmt.Errorf("another start or stop of this config is in progress (%s)", lockFile))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func startBackground(configPath string, stderr io.Writer) int {
+	running, err := openBackground(configPath, 0)
+	if err != nil {
+		return fail(stderr, err)
+	}
+	if running != nil {
+		syscall.CloseHandle(running.process)
+		return fail(stderr, fmt.Errorf("already running (pid %d)", running.pid))
 	}
 	// Check everything the background process needs here, where errors are
 	// visible; the detached process has no console to report them.
@@ -56,7 +109,6 @@ func start(configPath string, stderr io.Writer) int {
 	if err != nil {
 		return fail(stderr, err)
 	}
-	logPath := logFile.Name()
 	logFile.Close()
 	addr := listenAddr(cfg)
 	ln, err := net.Listen("tcp", addr)
@@ -77,22 +129,30 @@ func start(configPath string, stderr io.Writer) int {
 	if err := cmd.Start(); err != nil {
 		return fail(stderr, err)
 	}
+	// Until cmd.Wait, the PID can't be reused: this is the time of the child.
+	created, err := creationTime(cmd.Process.Pid)
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
-	if err := waitListening(addr, exited); err != nil {
+	if err == nil {
+		err = waitListening(cmd.Process.Pid, addr, exited)
+	}
+	if err != nil {
 		cmd.Process.Kill()
 		return fail(stderr, fmt.Errorf("background process failed to start: %w; run without a command to see why", err))
 	}
-	if err := os.WriteFile(pidFilePath(configPath), []byte(strconv.Itoa(cmd.Process.Pid)), 0o600); err != nil {
+	pidFile := fmt.Sprintf("%d %d\n", cmd.Process.Pid, created)
+	if err := os.WriteFile(pidFilePath(configPath), []byte(pidFile), 0o600); err != nil {
 		cmd.Process.Kill()
 		return fail(stderr, err)
 	}
 	fmt.Fprintf(stderr, "network-sandbox: started in the background (pid %d), listening on %s, logging to %s\n",
-		cmd.Process.Pid, addr, logPath)
+		cmd.Process.Pid, addr, logFile.Name())
 	return 0
 }
 
-func waitListening(addr string, exited <-chan error) error {
+// waitListening waits until the process itself listens on addr. Connecting to
+// addr would not tell: another process could have taken the port.
+func waitListening(pid int, addr string, exited <-chan error) error {
 	deadline := time.Now().Add(startTimeout)
 	for time.Now().Before(deadline) {
 		select {
@@ -103,8 +163,9 @@ func waitListening(addr string, exited <-chan error) error {
 			return err
 		default:
 		}
-		if conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
-			conn.Close()
+		if listeners, err := loopbackListeners(); err != nil {
+			return err
+		} else if listeners[pid] == addr {
 			return nil
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -112,31 +173,39 @@ func waitListening(addr string, exited <-chan error) error {
 	return fmt.Errorf("not listening on %s after %s", addr, startTimeout)
 }
 
-// stop terminates the background process. Stopping one that isn't running succeeds.
-func stop(configPath string, stderr io.Writer) int {
-	pidFile := pidFilePath(configPath)
-	pid, _ := runningPID(configPath)
-	if pid == 0 {
-		os.Remove(pidFile) // stale
+// stopBackground terminates the background process. Stopping one that isn't
+// running succeeds.
+func stopBackground(configPath string, stderr io.Writer) int {
+	running, err := openBackground(configPath, syscall.PROCESS_TERMINATE)
+	if err != nil {
+		return fail(stderr, err)
+	}
+	if running == nil {
+		os.Remove(pidFilePath(configPath)) // stale
 		fmt.Fprintln(stderr, "network-sandbox: not running")
 		return 0
 	}
-	if err := terminate(pid); err != nil {
-		return fail(stderr, fmt.Errorf("cannot stop pid %d: %w", pid, err))
+	defer syscall.CloseHandle(running.process)
+	if err := terminate(running.process); err != nil {
+		return fail(stderr, fmt.Errorf("cannot stop pid %d: %w", running.pid, err))
 	}
-	os.Remove(pidFile)
-	fmt.Fprintf(stderr, "network-sandbox: stopped (pid %d)\n", pid)
+	os.Remove(pidFilePath(configPath))
+	fmt.Fprintf(stderr, "network-sandbox: stopped (pid %d)\n", running.pid)
 	return 0
 }
 
 // status reports whether the background proxy of this config is running.
 func status(configPath string, stderr io.Writer) int {
-	pid, listen := runningPID(configPath)
-	if pid == 0 {
+	running, err := openBackground(configPath, 0)
+	if err != nil {
+		return fail(stderr, err)
+	}
+	if running == nil {
 		fmt.Fprintln(stderr, "network-sandbox: not running")
 		return exitNotRunning
 	}
-	fmt.Fprintf(stderr, "network-sandbox: running (pid %d) on %s -config %s\n", pid, listen, configPath)
+	syscall.CloseHandle(running.process)
+	fmt.Fprintf(stderr, "network-sandbox: running (pid %d) on %s -config %s\n", running.pid, running.listen, configPath)
 	return 0
 }
 
@@ -263,42 +332,85 @@ func commandLineArgs(commandLine string) string {
 	return strings.TrimSpace(args)
 }
 
-// pidFilePath is the config path with a .pid extension, so instances with
-// different configs don't collide.
+// pidFilePath is the config path plus ".pid", so every config has its own PID
+// file and none can be mistaken for one.
 func pidFilePath(configPath string) string {
-	return strings.TrimSuffix(configPath, filepath.Ext(configPath)) + ".pid"
+	return configPath + ".pid"
 }
 
-// runningPID returns the PID from the PID file and the listen address of that
-// process if it is still a running proxy, and 0 otherwise (no file, or a stale
-// or reused PID).
-func runningPID(configPath string) (pid int, listen string) {
+// background is a running background proxy.
+type background struct {
+	process syscall.Handle
+	pid     int
+	listen  string
+}
+
+// openBackground opens the background proxy of the config with the given
+// access rights, so that the caller acts on the very process that was
+// checked. It returns nil if no proxy runs: there is no PID file, or the
+// process it names is gone.
+//
+// The PID file holds the PID and the creation time of the process, which
+// together identify it; the PID alone could meanwhile belong to another
+// process. The process must also look like a proxy, so that a forged PID
+// file can't direct "stop" at an arbitrary process.
+func openBackground(configPath string, access uint32) (*background, error) {
 	data, err := os.ReadFile(pidFilePath(configPath))
 	if err != nil {
-		return 0, ""
+		return nil, nil
 	}
-	pid, err = strconv.Atoi(strings.TrimSpace(string(data)))
+	var pid int
+	var created int64
+	if _, err := fmt.Sscanf(string(data), "%d %d", &pid, &created); err != nil {
+		return nil, nil
+	}
+	proxies, err := runningProxies()
 	if err != nil {
-		return 0, ""
+		return nil, err
 	}
-	proxies, _ := runningProxies()
-	listen, running := proxies[pid]
-	if !running {
-		return 0, ""
+	listen, isProxy := proxies[pid]
+	if !isProxy {
+		return nil, nil
 	}
-	return pid, listen
+	process, err := syscall.OpenProcess(access|processQueryLimitedInformation|syscall.SYNCHRONIZE, false, uint32(pid))
+	if err != nil {
+		return nil, fmt.Errorf("cannot access pid %d: %w", pid, err)
+	}
+	if processCreated, err := handleCreationTime(process); err != nil || processCreated != created || hasExited(process) {
+		syscall.CloseHandle(process)
+		return nil, nil
+	}
+	return &background{process, pid, listen}, nil
 }
 
-func terminate(pid int) error {
-	h, err := syscall.OpenProcess(syscall.PROCESS_TERMINATE|syscall.SYNCHRONIZE, false, uint32(pid))
+// creationTime returns when the process was created, in nanoseconds since 1970.
+func creationTime(pid int) (int64, error) {
+	process, err := syscall.OpenProcess(processQueryLimitedInformation, false, uint32(pid))
 	if err != nil {
+		return 0, err
+	}
+	defer syscall.CloseHandle(process)
+	return handleCreationTime(process)
+}
+
+func handleCreationTime(process syscall.Handle) (int64, error) {
+	var created, exited, kernel, user syscall.Filetime
+	if err := syscall.GetProcessTimes(process, &created, &exited, &kernel, &user); err != nil {
+		return 0, err
+	}
+	return created.Nanoseconds(), nil
+}
+
+func hasExited(process syscall.Handle) bool {
+	event, _ := syscall.WaitForSingleObject(process, 0)
+	return event == syscall.WAIT_OBJECT_0
+}
+
+func terminate(process syscall.Handle) error {
+	if err := syscall.TerminateProcess(process, 1); err != nil {
 		return err
 	}
-	defer syscall.CloseHandle(h)
-	if err := syscall.TerminateProcess(h, 1); err != nil {
-		return err
-	}
-	if ev, err := syscall.WaitForSingleObject(h, 5000); err != nil || ev != syscall.WAIT_OBJECT_0 {
+	if ev, err := syscall.WaitForSingleObject(process, 5000); err != nil || ev != syscall.WAIT_OBJECT_0 {
 		return errors.New("process did not exit")
 	}
 	return nil

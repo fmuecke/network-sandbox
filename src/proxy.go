@@ -5,14 +5,18 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
+	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -23,10 +27,11 @@ const (
 
 // Proxy is an HTTP proxy that only reaches whitelisted destinations.
 type Proxy struct {
-	whitelist *Whitelist
-	log       *slog.Logger
-	dialer    net.Dialer
-	forward   *httputil.ReverseProxy
+	whitelist    *Whitelist
+	allowPrivate bool // hostnames may resolve to non-public addresses
+	idleTimeout  time.Duration
+	log          *slog.Logger
+	forward      *httputil.ReverseProxy
 
 	mu      sync.Mutex
 	closed  bool
@@ -44,12 +49,13 @@ type record struct {
 
 type recordKey struct{}
 
-func NewProxy(wl *Whitelist, log *slog.Logger) *Proxy {
+func NewProxy(wl *Whitelist, allowPrivate bool, log *slog.Logger) *Proxy {
 	p := &Proxy{
-		whitelist: wl,
-		log:       log,
-		dialer:    net.Dialer{Timeout: dialTimeout},
-		tunnels:   map[net.Conn]bool{},
+		whitelist:    wl,
+		allowPrivate: allowPrivate,
+		idleTimeout:  idleTimeout,
+		log:          log,
+		tunnels:      map[net.Conn]bool{},
 	}
 	p.forward = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -61,13 +67,18 @@ func NewProxy(wl *Whitelist, log *slog.Logger) *Proxy {
 		},
 		Transport: &http.Transport{
 			Proxy:           nil, // never chain to a proxy from the environment
-			DialContext:     p.dialer.DialContext,
+			DialContext:     p.dial,
 			IdleConnTimeout: 90 * time.Second,
 		},
 		FlushInterval: -1, // stream responses (e.g. server-sent events) without delay
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			rec := r.Context().Value(recordKey{}).(*record)
 			rec.err = err
+			if errors.Is(err, errNonPublic) {
+				rec.decision = "deny"
+				http.Error(w, nonPublicMessage(rec.target), http.StatusForbidden)
+				return
+			}
 			http.Error(w, "network-sandbox: upstream error: "+err.Error(), http.StatusBadGateway)
 		},
 		ErrorLog: slog.NewLogLogger(log.Handler(), slog.LevelWarn),
@@ -76,13 +87,17 @@ func NewProxy(wl *Whitelist, log *slog.Logger) *Proxy {
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
 	rec := &record{decision: "deny"}
+	// Deferred, so that a transfer that net/http aborts with a panic is logged too.
+	defer p.logRequest(r, rec, time.Now())
 	if r.Method == http.MethodConnect {
 		p.tunnel(w, r, rec)
 	} else {
 		p.forwardHTTP(w, r, rec)
 	}
+}
+
+func (p *Proxy) logRequest(r *http.Request, rec *record, start time.Time) {
 	attrs := []any{
 		"client", r.RemoteAddr,
 		"method", r.Method,
@@ -113,7 +128,12 @@ func (p *Proxy) tunnel(w http.ResponseWriter, r *http.Request, rec *record) {
 	}
 	rec.target, rec.decision = target, "allow"
 
-	upstream, err := p.dialer.DialContext(r.Context(), "tcp", target)
+	upstream, err := p.dial(r.Context(), "tcp", target)
+	if errors.Is(err, errNonPublic) {
+		rec.decision, rec.err = "deny", err
+		p.reject(w, rec, http.StatusForbidden, nonPublicMessage(target))
+		return
+	}
 	if err != nil {
 		rec.err = err
 		p.reject(w, rec, http.StatusBadGateway, "network-sandbox: cannot reach "+target)
@@ -180,15 +200,77 @@ func (p *Proxy) forwardHTTP(w http.ResponseWriter, r *http.Request, rec *record)
 	}
 	rec.target, rec.decision = target, "allow"
 	if p.log.Enabled(r.Context(), slog.LevelDebug) {
-		p.log.Debug("request headers", "target", target, "url", r.URL.String(), "headers", redactHeaders(r.Header))
+		p.log.Debug("request headers", "target", target, "url", redactURL(r.URL), "headers", redactHeaders(r.Header))
 	}
 
 	r.URL.Host = target // dial exactly what was matched
 	body := &countingReader{r: r.Body}
 	r.Body = body
 	cw := &countingWriter{ResponseWriter: w}
+	defer func() { rec.status, rec.up, rec.down = cw.status, body.n, cw.n }()
 	p.forward.ServeHTTP(cw, r.WithContext(context.WithValue(r.Context(), recordKey{}, rec)))
-	rec.status, rec.up, rec.down = cw.status, body.n, cw.n
+}
+
+var errNonPublic = errors.New("not a public address")
+
+func nonPublicMessage(target string) string {
+	return fmt.Sprintf("network-sandbox: %s resolves to a non-public address", target)
+}
+
+// dial connects to a whitelisted target. A hostname is resolved here, by the
+// system resolver, and must lead to a public address: otherwise a DNS answer
+// could point an allowed name at loopback or the local network. An IP literal
+// was whitelisted as such and is dialed as it is.
+func (p *Proxy) dial(ctx context.Context, network, target string) (net.Conn, error) {
+	dialer := net.Dialer{Timeout: dialTimeout}
+	host, _, _ := net.SplitHostPort(target)
+	if _, err := netip.ParseAddr(host); err != nil && !p.allowPrivate {
+		// Control sees the address of each connection attempt, so it checks
+		// exactly what gets connected, whatever the resolver answers.
+		dialer.Control = func(_, address string, _ syscall.RawConn) error {
+			if ap, err := netip.ParseAddrPort(address); err != nil || !isPublic(ap.Addr()) {
+				return errNonPublic
+			}
+			return nil
+		}
+	}
+	conn, err := dialer.DialContext(ctx, network, target)
+	if err != nil {
+		return nil, err
+	}
+	return &idleConn{Conn: conn, idle: p.idleTimeout}, nil
+}
+
+// nonPublic lists address ranges that aren't reachable on the internet, in
+// addition to those that netip.Addr classifies itself.
+var nonPublic = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),     // this network
+	netip.MustParsePrefix("100.64.0.0/10"), // carrier-grade NAT
+	netip.MustParsePrefix("192.0.0.0/24"),  // IETF protocol assignments
+	netip.MustParsePrefix("198.18.0.0/15"), // benchmarking
+	netip.MustParsePrefix("240.0.0.0/4"),   // reserved
+	netip.MustParsePrefix("fec0::/10"),     // site-local (deprecated)
+}
+
+var nat64 = netip.MustParsePrefix("64:ff9b::/96")
+
+// isPublic reports whether addr is a public unicast address: not loopback,
+// private, link-local, multicast, unspecified or otherwise reserved.
+func isPublic(addr netip.Addr) bool {
+	addr = addr.Unmap().WithZone("")
+	if nat64.Contains(addr) { // stands for the IPv4 address in its last four bytes
+		b := addr.As16()
+		addr = netip.AddrFrom4([4]byte(b[12:]))
+	}
+	if !addr.IsGlobalUnicast() || addr.IsPrivate() {
+		return false
+	}
+	for _, prefix := range nonPublic {
+		if prefix.Contains(addr) {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *Proxy) reject(w http.ResponseWriter, rec *record, status int, msg string) {
@@ -226,21 +308,35 @@ func (p *Proxy) CloseTunnels() {
 	}
 }
 
-var secretHeaders = map[string]bool{
-	"Authorization":       true,
-	"Proxy-Authorization": true,
-	"Cookie":              true,
-	"X-Api-Key":           true,
+// safeHeaders are the headers whose values the debug log shows. All other
+// values are redacted: credentials travel in too many headers to list them.
+var safeHeaders = map[string]bool{
+	"Accept":          true,
+	"Accept-Encoding": true,
+	"Content-Length":  true,
+	"Content-Type":    true,
+	"User-Agent":      true,
 }
 
 func redactHeaders(h http.Header) http.Header {
 	c := h.Clone()
 	for k := range c {
-		if secretHeaders[k] {
+		if !safeHeaders[k] {
 			c[k] = []string{"[redacted]"}
 		}
 	}
 	return c
+}
+
+// redactURL returns the URL without user information and query, which often
+// carry credentials (signed URLs, access tokens).
+func redactURL(u *url.URL) string {
+	c := *u
+	c.User = nil
+	if c.RawQuery != "" {
+		c.RawQuery = "[redacted]"
+	}
+	return c.String()
 }
 
 type countingReader struct {

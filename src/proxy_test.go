@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -61,6 +62,13 @@ func (b *syncBuffer) waitForLog(t *testing.T, parts ...string) string {
 
 func startProxy(t *testing.T, entries ...string) (*httptest.Server, *syncBuffer) {
 	t.Helper()
+	return startProxyWith(t, func(*Proxy) {}, entries...)
+}
+
+// startProxyWith starts a proxy that configure has adjusted, behind the same
+// listener as in production.
+func startProxyWith(t *testing.T, configure func(*Proxy), entries ...string) (*httptest.Server, *syncBuffer) {
+	t.Helper()
 	wl := newWhitelist()
 	for _, e := range entries {
 		if err := wl.add(e); err != nil {
@@ -68,8 +76,11 @@ func startProxy(t *testing.T, entries ...string) (*httptest.Server, *syncBuffer)
 		}
 	}
 	logs := &syncBuffer{}
-	p := NewProxy(wl, slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	srv := httptest.NewServer(p)
+	p := NewProxy(wl, false, slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	configure(p)
+	srv := httptest.NewUnstartedServer(p)
+	srv.Listener = newLimitListener(srv.Listener, maxConnections, p.idleTimeout)
+	srv.Start()
 	t.Cleanup(func() {
 		p.CloseTunnels()
 		srv.Close()
@@ -103,9 +114,10 @@ func TestForwardHTTPAllowed(t *testing.T) {
 	defer upstream.Close()
 	proxy, logs := startProxy(t, hostOf(upstream.URL))
 
-	req, _ := http.NewRequest("GET", upstream.URL+"/path", nil)
+	req, _ := http.NewRequest("GET", upstream.URL+"/path?access_token=query-secret", nil)
 	req.Header.Set("Proxy-Foo", "secret")
 	req.Header.Set("Authorization", "Bearer token")
+	req.Header.Set("X-Amz-Security-Token", "custom-secret")
 	resp, err := proxyClient(t, proxy, nil).Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -122,9 +134,97 @@ func TestForwardHTTPAllowed(t *testing.T) {
 		t.Error("Authorization header was not forwarded")
 	}
 	logs.waitForLog(t, "method=GET", "target="+hostOf(upstream.URL), "decision=allow", "status=200", "bytes_down=5", "duration=")
-	debug := logs.waitForLog(t, "level=DEBUG", "request headers")
-	if strings.Contains(debug, "Bearer token") {
-		t.Error("debug log contains the Authorization value")
+	debug := logs.waitForLog(t, "level=DEBUG", "request headers", "/path?[redacted]", "User-Agent:[Go-http-client", "X-Amz-Security-Token:[[redacted]]")
+	for _, secret := range []string{"Bearer token", "custom-secret", "query-secret"} {
+		if strings.Contains(debug, secret) {
+			t.Errorf("debug log contains %q: %s", secret, debug)
+		}
+	}
+}
+
+func TestRedactURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"http://example.com/a/b":                        "http://example.com/a/b",
+		"http://user:password@example.com:8080/a?sig=x": "http://example.com:8080/a?[redacted]",
+	} {
+		u, err := url.Parse(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := redactURL(u); got != want {
+			t.Errorf("redactURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// An allowed hostname must not lead to loopback or the local network, unless
+// the config allows it. "localhost" stands for a name that resolves there.
+func TestHostnameResolvingToNonPublicAddress(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "hello")
+	}))
+	defer upstream.Close()
+	target := "localhost:" + strings.TrimPrefix(hostOf(upstream.URL), "127.0.0.1:")
+
+	proxy, logs := startProxy(t, target)
+	resp, body := rawConnect(t, proxy, target)
+	if resp.StatusCode != 403 || !strings.Contains(body, "network-sandbox: "+target+" resolves to a non-public address") {
+		t.Errorf("CONNECT: got %d %q", resp.StatusCode, body)
+	}
+	logs.waitForLog(t, "method=CONNECT", "target="+target, "decision=deny", "status=403", "error=")
+	r, err := proxyClient(t, proxy, nil).Get("http://" + target + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(r.Body)
+	r.Body.Close()
+	if r.StatusCode != 403 || !strings.Contains(string(b), "resolves to a non-public address") {
+		t.Errorf("HTTP: got %d %q", r.StatusCode, b)
+	}
+	logs.waitForLog(t, "method=GET", "target="+target, "decision=deny", "status=403", "error=")
+
+	proxy, _ = startProxyWith(t, func(p *Proxy) { p.allowPrivate = true }, target)
+	r, err = proxyClient(t, proxy, nil).Get("http://" + target + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ = io.ReadAll(r.Body)
+	r.Body.Close()
+	if r.StatusCode != 200 || string(b) != "hello" {
+		t.Errorf("privateaddresses=allow: got %d %q", r.StatusCode, b)
+	}
+}
+
+func TestIsPublic(t *testing.T) {
+	for addr, want := range map[string]bool{
+		"140.82.112.3":         true,
+		"2606:4700::6810:1":    true,
+		"64:ff9b::8c52:7003":   true, // NAT64 for 140.82.112.3
+		"127.0.0.1":            false,
+		"::1":                  false,
+		"::ffff:127.0.0.1":     false,
+		"10.1.2.3":             false,
+		"172.16.0.1":           false,
+		"192.168.1.1":          false,
+		"169.254.169.254":      false, // cloud metadata
+		"100.64.0.1":           false,
+		"0.0.0.0":              false,
+		"0.1.2.3":              false,
+		"224.0.0.1":            false,
+		"255.255.255.255":      false,
+		"::":                   false,
+		"fe80::1":              false,
+		"fe80::1%eth0":         false,
+		"fd00::1":              false,
+		"ff02::1":              false,
+		"64:ff9b::7f00:1":      false, // NAT64 for 127.0.0.1
+		"64:ff9b::c0a8:101":    false, // NAT64 for 192.168.1.1
+		"::ffff:140.82.112.3":  true,
+		"2001:4860:4860::8888": true,
+	} {
+		if got := isPublic(netip.MustParseAddr(addr)); got != want {
+			t.Errorf("isPublic(%s) = %v, want %v", addr, got, want)
+		}
 	}
 }
 

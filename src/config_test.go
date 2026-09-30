@@ -23,7 +23,7 @@ func TestParseConfigExample(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 			continue
 		}
-		if cfg.Port != 8080 || cfg.LogFile != "network-sandbox.log" || cfg.LogLevel != slog.LevelInfo {
+		if cfg.Port != 8080 || cfg.LogFile != "network-sandbox.log" || cfg.LogLevel != slog.LevelInfo || cfg.AllowPrivate {
 			t.Errorf("%s: got %+v", name, cfg)
 		}
 		if cfg.Whitelist.Len() != 7 {
@@ -42,6 +42,18 @@ func TestParseConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestParseConfigPrivateAddresses(t *testing.T) {
+	for value, want := range map[string]bool{"allow": true, "Allow": true, "deny": false} {
+		cfg, err := ParseConfig(strings.NewReader("[network-sandbox]\nport=3128\nprivateaddresses=" + value + "\n[whitelist]\ngithub.com:443\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.AllowPrivate != want {
+			t.Errorf("privateaddresses=%s: AllowPrivate = %v, want %v", value, cfg.AllowPrivate, want)
+		}
+	}
+}
+
 func TestParseConfigErrors(t *testing.T) {
 	const wl = "[whitelist]\ngithub.com:443\n"
 	for name, input := range map[string]string{
@@ -52,6 +64,7 @@ func TestParseConfigErrors(t *testing.T) {
 		"unknown key":        "[network-sandbox]\nport=8080\nlisten=0.0.0.0\n" + wl,
 		"duplicate key":      "[network-sandbox]\nport=8080\nport=8081\n" + wl,
 		"bad loglevel":       "[network-sandbox]\nport=8080\nloglevel=trace\n" + wl,
+		"bad private":        "[network-sandbox]\nport=8080\nprivateaddresses=yes\n" + wl,
 		"empty logfile":      "[network-sandbox]\nport=8080\nlogfile=\n" + wl,
 		"no equals":          "[network-sandbox]\nport 8080\n" + wl,
 		"unknown section":    "[network-sandbox]\nport=8080\n[blacklist]\nevil.com:443\n" + wl,

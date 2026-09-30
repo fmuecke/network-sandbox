@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+- Security: The proxy bounds what clients can use of it. It serves at most 256 connections at a
+  time, closes tunnels and transfers without traffic for 15 minutes and idle keep-alive connections
+  after 2 minutes, and rotates the log at 10 MB, keeping three old files. Before, a client could
+  hold unlimited idle connections and fill the disk through the log.
+- Security: A whitelisted hostname connects to public addresses only. If it resolves to a
+  loopback, private or link-local address, the request gets `403`. The new key
+  `privateaddresses=allow` restores the old behavior for networks with internal hosts. IP entries
+  are unaffected.
+- Security: `loglevel=debug` no longer logs the user info and query string of URLs, and redacts
+  all header values except a few harmless ones. Before, only four known headers were redacted.
+- Security: The PID file is now `<config>.pid` (e.g. `network-sandbox.ini.pid`) and holds the PID
+  and creation time of the proxy. Before, configs that differed only in the extension shared a PID
+  file, a config named `*.pid` was overwritten, and `stop` could hit another process that reused
+  the PID. `start`, `stop` and `restart` of one config no longer run concurrently, and `start`
+  checks that its own process listens on the port.
+  **Upgrading:** stop background proxies with the old version first. The new version ignores old
+  PID files.
+- Fixed: Plain-HTTP transfers that were aborted midway were missing from the log.
+- Fixed: The README named `manual-tests.ps1`; the script is `demo.ps1`.
+- Changed: (internal) The release workflow pins actions to commit SHAs, with Dependabot updating
+  them. The Go module is named `github.com/fmuecke/network-sandbox`.
 - Changed: `status` without `-config` lists every running proxy with its PID, listen address and
   config, including proxies that run in a console. Before, it reported only the background proxy
   of the default config. `status -config <path>` still checks that config's background proxy and
