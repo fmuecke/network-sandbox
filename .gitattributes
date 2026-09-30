@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Florian Mücke
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# gofmt requires LF; without this, Windows checkouts (autocrlf) fail the gofmt check.
+*.go text eol=lf
