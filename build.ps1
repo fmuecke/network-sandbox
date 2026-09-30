@@ -19,7 +19,11 @@ Invoke-Step 'gofmt' {
 Invoke-Step 'go vet' { go vet ./... }
 Invoke-Step 'go test' { go test -count=1 ./... }
 
-$env:CGO_ENABLED = '0'  # static binary, no C runtime dependency
-Invoke-Step 'go build' { go build -trimpath -ldflags '-s -w' -o out/network-sandbox.exe ./src }
+# Version from git: the tag (e.g. v1.2.0), tag plus commits since, or the commit hash.
+$version = git describe --tags --always --dirty 2>$null
+if ($LASTEXITCODE -ne 0 -or -not $version) { $version = 'dev' }
 
-Write-Host "Built $(Join-Path $PSScriptRoot 'out\network-sandbox.exe')"
+$env:CGO_ENABLED = '0'  # static binary, no C runtime dependency
+Invoke-Step 'go build' { go build -trimpath -ldflags "-s -w -X main.version=$version" -o out/network-sandbox.exe ./src }
+
+Write-Host "Built $(Join-Path $PSScriptRoot 'out\network-sandbox.exe') ($version)"

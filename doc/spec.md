@@ -116,9 +116,21 @@ Validation fails closed. Any of the following prints an error to stderr and exit
 
 ## 7. Operation
 
-- CLI: `network-sandbox.exe [-config <path>]`.
-- Runs as a console process. At startup it logs the listen address and the number of whitelist entries.
-- Ctrl+C stops accepting connections, closes open tunnels, and exits.
+- CLI: `network-sandbox.exe [start|stop|restart|status] [-config <path>]`.
+- `-help`, `-?`, `/?`, `/help` (also `-h`, `--help`, case-insensitive, anywhere on the command line) print usage and exit 0. Invalid arguments print a short hint to `-help` and exit 2.
+- Without a command, it runs in the console. At startup it logs the listen address and the number of whitelist entries. Ctrl+C stops accepting connections, closes open tunnels, and exits.
+- Background mode, without installing a Windows service:
+
+  | Command | Behavior |
+  |---|---|
+  | `start` | Checks the config, log file and port, then starts a detached copy of itself without a console. Waits until it listens, and writes its PID to `<config name>.pid` next to the config. Fails if it's already running. |
+  | `stop` | Terminates the process from the PID file and deletes the file. Open connections are cut. Succeeds if nothing is running. |
+  | `restart` | `stop`, then `start`. Use it to apply config changes. |
+  | `status` | Prints the PID and exits with 0 if running, or 3 if not. |
+
+  Before trusting a PID from the file, the commands check that the process is still running and is a `network-sandbox` executable, so a stale file or a reused PID is ignored.
+
+  There is no network control endpoint, because the agent could use it to stop the proxy. `stop` needs the rights to terminate the process, so the agent user can't stop a proxy that runs under another account.
 - Timeouts:
   - dial: 10 s
   - reading request headers: 30 s

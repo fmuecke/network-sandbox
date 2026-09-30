@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,55 +29,109 @@ import (
 //go:embed example.ini
 var exampleConfig []byte
 
+// version is set at build time: go build -ldflags "-X main.version=..."
+var version = "dev"
+
+const copyright = `Copyright (C) 2026 Florian Mücke
+This is free software - you are welcome to redistribute it under the terms
+of the GNU General Public License version 3+; see LICENSE for details.
+`
+
+const usage = `
+Loopback-only HTTP proxy that forwards requests to whitelisted hosts only.
+
+Usage: network-sandbox.exe [command] [-config <path>]
+
+Commands:
+  (none)    run in the console until Ctrl+C
+  start     run in the background
+  stop      stop the background proxy
+  restart   stop, then start (applies config changes)
+  status    show whether the background proxy is running
+
+Options:
+  -config <path>   config file (default: network-sandbox.ini next to the exe).
+                   If it doesn't exist, an example is created there.
+  -help, -?, /?    show this help
+
+Exit codes: 0 success, 1 error, 2 invalid arguments, 3 not running (status)
+
+Agents use the proxy through HTTPS_PROXY=http://127.0.0.1:<port> and HTTP_PROXY.
+`
+
+var helpArgs = map[string]bool{"-?": true, "/?": true, "-h": true, "/h": true, "-help": true, "--help": true, "/help": true}
+
 func main() {
 	os.Exit(run(os.Args[1:], os.Stderr))
 }
 
 func run(args []string, stderr io.Writer) int {
-	exeDir := "."
-	if exe, err := os.Executable(); err == nil {
-		exeDir = filepath.Dir(exe)
+	for _, arg := range args {
+		if helpArgs[strings.ToLower(arg)] {
+			fmt.Fprintf(stderr, "network-sandbox %s - %s%s", version, copyright, usage)
+			return 0
+		}
+	}
+	command := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		command, args = args[0], args[1:]
 	}
 	flags := flag.NewFlagSet("network-sandbox", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	configPath := flags.String("config", filepath.Join(exeDir, "network-sandbox.ini"), "path to the config file")
+	flags.Usage = func() { fmt.Fprintln(stderr, "run network-sandbox.exe -help for usage") }
+	configPath := flags.String("config", filepath.Join(exeDir(), "network-sandbox.ini"), "path to the config file")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
-	if flags.NArg() > 0 {
+	if flags.NArg() == 1 && command == "" {
+		command = flags.Arg(0)
+	} else if flags.NArg() > 0 {
 		fmt.Fprintln(stderr, "network-sandbox: unexpected arguments:", flags.Args())
+		flags.Usage()
 		return 2
 	}
-	fail := func(err error) int {
-		fmt.Fprintln(stderr, "network-sandbox:", err)
-		return 1
+	path, err := filepath.Abs(*configPath)
+	if err != nil {
+		return fail(stderr, err)
 	}
 
-	cfg, err := LoadConfig(*configPath)
-	if errors.Is(err, fs.ErrNotExist) {
-		// Don't start with a whitelist nobody has reviewed: write the example and stop.
-		if err := writeNewFile(*configPath, exampleConfig); err != nil {
-			return fail(err)
+	switch command {
+	case "":
+		return serve(path, stderr)
+	case "start":
+		return start(path, stderr)
+	case "stop":
+		return stop(path, stderr)
+	case "restart":
+		if code := stop(path, stderr); code != 0 {
+			return code
 		}
-		return fail(fmt.Errorf("no config found; created example config %s - review it and start again", *configPath))
+		return start(path, stderr)
+	case "status":
+		return status(path, stderr)
+	default:
+		fmt.Fprintf(stderr, "network-sandbox: unknown command %q\n", command)
+		flags.Usage()
+		return 2
 	}
+}
+
+// serve runs the proxy in the foreground until interrupted.
+func serve(configPath string, stderr io.Writer) int {
+	cfg, err := loadConfig(configPath)
 	if err != nil {
-		return fail(err)
+		return fail(stderr, err)
 	}
-	logPath := cfg.LogFile
-	if !filepath.IsAbs(logPath) {
-		logPath = filepath.Join(exeDir, logPath)
-	}
-	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	logFile, err := openLog(cfg)
 	if err != nil {
-		return fail(err)
+		return fail(stderr, err)
 	}
 	defer logFile.Close()
 	log := slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: cfg.LogLevel}))
 
-	ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(int(cfg.Port))))
+	ln, err := net.Listen("tcp", listenAddr(cfg))
 	if err != nil {
-		return fail(err)
+		return fail(stderr, err)
 	}
 	proxy := NewProxy(cfg.Whitelist, log)
 	srv := &http.Server{
@@ -85,18 +140,18 @@ func run(args []string, stderr io.Writer) int {
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	log.Info("started", "listen", ln.Addr().String(), "whitelist_entries", cfg.Whitelist.Len(), "config", *configPath)
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	log.Info("started", "version", version, "listen", ln.Addr().String(), "whitelist_entries", cfg.Whitelist.Len(), "config", configPath)
 	fmt.Fprintf(stderr, "network-sandbox: listening on %s, %d whitelist entries, logging to %s\n",
-		ln.Addr(), cfg.Whitelist.Len(), logPath)
+		ln.Addr(), cfg.Whitelist.Len(), logFile.Name())
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 	select {
 	case err := <-serveErr:
 		log.Error("server failed", "error", err)
-		return fail(err)
+		return fail(stderr, err)
 	case <-ctx.Done():
 	}
 
@@ -108,6 +163,44 @@ func run(args []string, stderr io.Writer) int {
 	}
 	log.Info("stopped")
 	return 0
+}
+
+// loadConfig loads the config. If it doesn't exist, it writes the example
+// and fails: the proxy must not start with a whitelist nobody has reviewed.
+func loadConfig(path string) (*Config, error) {
+	cfg, err := LoadConfig(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		if err := writeNewFile(path, exampleConfig); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("no config found; created example config %s - review it and start again", path)
+	}
+	return cfg, err
+}
+
+func openLog(cfg *Config) (*os.File, error) {
+	path := cfg.LogFile
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(exeDir(), path)
+	}
+	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+}
+
+func listenAddr(cfg *Config) string {
+	return net.JoinHostPort("127.0.0.1", strconv.Itoa(int(cfg.Port)))
+}
+
+func exeDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return "."
+	}
+	return filepath.Dir(exe)
+}
+
+func fail(stderr io.Writer, err error) int {
+	fmt.Fprintln(stderr, "network-sandbox:", err)
+	return 1
 }
 
 // writeNewFile creates path with data; it never overwrites an existing file.
