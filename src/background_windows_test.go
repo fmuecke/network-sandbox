@@ -32,7 +32,7 @@ func TestBackgroundCommands(t *testing.T) {
 	}
 	addr := ln.Addr().String()
 	ln.Close()
-	config := filepath.Join(dir, "network-sandbox.ini")
+	config := filepath.Join(dir, "background.ini")
 	os.WriteFile(config, []byte(fmt.Sprintf("[network-sandbox]\nport=%s\nlogfile=%s\n[whitelist]\ngithub.com:443\n",
 		addr[strings.LastIndex(addr, ":")+1:], filepath.Join(dir, "sandbox.log"))), 0o600)
 
@@ -73,6 +73,67 @@ func TestBackgroundCommands(t *testing.T) {
 	expect("start", 1, "already running")
 	pidBefore, _ := os.ReadFile(pidFilePath(config))
 
+	// Without -config, status lists every proxy, also one that runs in the
+	// console with the default config, but no other program of the same name.
+	ln, err = net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	consoleAddr := ln.Addr().String()
+	ln.Close()
+	os.WriteFile(filepath.Join(dir, defaultConfigName), []byte(fmt.Sprintf("[network-sandbox]\nport=%s\nlogfile=%s\n[whitelist]\ngithub.com:443\n",
+		consoleAddr[strings.LastIndex(consoleAddr, ":")+1:], filepath.Join(dir, "console.log"))), 0o600)
+	console := exec.Command(exe)
+	if err := console.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { console.Process.Kill() })
+	cmdExe, err := os.ReadFile(filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	impostorExe := filepath.Join(t.TempDir(), "network-sandbox.exe")
+	os.WriteFile(impostorExe, cmdExe, 0o700)
+	impostor := exec.Command(impostorExe, "/k")
+	if _, err := impostor.StdinPipe(); err != nil { // cmd runs until its stdin closes
+		t.Fatal(err)
+	}
+	if err := impostor.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		impostor.Process.Kill()
+		impostor.Wait()
+	})
+	// statusLine returns the line of "status" about the proxy on addr, or "".
+	statusLine := func(addr string) string {
+		out, _ := exec.Command(exe, "status").CombinedOutput()
+		if strings.Contains(string(out), fmt.Sprintf("(pid %d)", impostor.Process.Pid)) {
+			t.Errorf("status lists a process that is no proxy:\n%s", out)
+		}
+		for line := range strings.Lines(string(out)) {
+			if strings.Contains(line, "running (pid") && strings.Contains(line, " on "+addr+" ") {
+				return strings.TrimSpace(line)
+			}
+		}
+		return ""
+	}
+	if line := statusLine(addr); !strings.HasSuffix(line, "-config "+config) {
+		t.Errorf("status without -config: background proxy: %q", line)
+	}
+	consoleLine := ""
+	for deadline := time.Now().Add(5 * time.Second); consoleLine == "" && time.Now().Before(deadline); {
+		consoleLine = statusLine(consoleAddr)
+	}
+	if !strings.HasSuffix(consoleLine, defaultConfigName) {
+		t.Errorf("status without -config: console proxy with the default config: %q", consoleLine)
+	}
+	console.Process.Kill()
+	console.Wait()
+	if line := statusLine(consoleAddr); line != "" {
+		t.Errorf("status without -config lists a stopped proxy: %q", line)
+	}
+
 	expect("restart", 0, "started in the background")
 	pidAfter, _ := os.ReadFile(pidFilePath(config))
 	if bytes.Equal(pidBefore, pidAfter) {
@@ -95,6 +156,20 @@ func TestBackgroundCommands(t *testing.T) {
 	// A stale PID file (here: our own, non-sandbox process) must not count as running.
 	os.WriteFile(pidFilePath(config), []byte(fmt.Sprint(os.Getpid())), 0o600)
 	expect("status", exitNotRunning, "not running")
+}
+
+func TestCommandLineArgs(t *testing.T) {
+	for in, want := range map[string]string{
+		`"C:\my dir\network-sandbox.exe" -config "C:\my dir\a.ini"`: `-config "C:\my dir\a.ini"`,
+		`C:\dir\network-sandbox.exe -config C:\dir\a.ini`:           `-config C:\dir\a.ini`,
+		`"C:\dir\network-sandbox.exe"`:                              "",
+		`network-sandbox.exe`:                                       "",
+		``:                                                          "",
+	} {
+		if got := commandLineArgs(in); got != want {
+			t.Errorf("commandLineArgs(%q) = %q, want %q", in, got, want)
+		}
+	}
 }
 
 func TestHelp(t *testing.T) {

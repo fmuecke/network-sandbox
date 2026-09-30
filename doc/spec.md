@@ -126,9 +126,13 @@ Validation fails closed. Any of the following prints an error to stderr and exit
   | `start` | Checks the config, log file and port, then starts a detached copy of itself without a console. Waits until it listens, and writes its PID to `<config name>.pid` next to the config. Fails if it's already running. |
   | `stop` | Terminates the process from the PID file and deletes the file. Open connections are cut. Succeeds if nothing is running. |
   | `restart` | `stop`, then `start`. Use it to apply config changes. |
-  | `status` | Prints the PID and exits with 0 if running, or 3 if not. |
+  | `status` | Without `-config`: lists every running proxy as `running (pid <pid>) on <listen address> -config <path>`. It reads the process list, so it includes proxies that run in a console. Exits with 0 if any runs, or 3 if none. With `-config`: prints the same line for that config's background proxy, found through its PID file, and exits with 0 if it runs, or 3 if not. |
 
-  Before trusting a PID from the file, the commands check that the process is still running and is a `network-sandbox` executable, so a stale file or a reused PID is ignored.
+  Each config has its own PID file and so its own background proxy; `start`, `stop` and `restart` act on the proxy of the given config (by default `network-sandbox.ini` next to the executable).
+
+  A process counts as a running proxy if it was started from an executable named like this one and listens on a `127.0.0.1` TCP port. The name alone isn't enough: it also matches unrelated programs and `network-sandbox` commands in progress. A PID from a PID file must pass the same check, so a stale file or a reused PID is ignored.
+
+  The listed config is the proxy's own `-config` argument as it was given, or the default config next to its executable if it was started without one. For a proxy that belongs to another account the arguments can't be read, and the line ends after the listen address.
 
   There is no network control endpoint, because the agent could use it to stop the proxy. `stop` needs the rights to terminate the process, so the agent user can't stop a proxy that runs under another account.
 - Timeouts:

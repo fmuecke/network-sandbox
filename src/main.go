@@ -37,6 +37,9 @@ This is free software - you are welcome to redistribute it under the terms
 of the GNU General Public License version 3+; see LICENSE for details.
 `
 
+// defaultConfigName is the config file used, next to the exe, without -config.
+const defaultConfigName = "network-sandbox.ini"
+
 const usage = `
 Loopback-only HTTP proxy that forwards requests to whitelisted hosts only.
 
@@ -47,11 +50,14 @@ Commands:
   start     run in the background
   stop      stop the background proxy
   restart   stop, then start (applies config changes)
-  status    show whether the background proxy is running
+  status    list all running proxies; with -config, check the background
+            proxy of that config only
 
 Options:
   -config <path>   config file (default: network-sandbox.ini next to the exe).
                    If it doesn't exist, an example is created there.
+                   Each config has its own proxy: start, stop and restart
+                   act on the proxy of this config.
   -help, -?, /?    show this help
 
 Exit codes: 0 success, 1 error, 2 invalid arguments, 3 not running (status)
@@ -79,7 +85,7 @@ func run(args []string, stderr io.Writer) int {
 	flags := flag.NewFlagSet("network-sandbox", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() { fmt.Fprintln(stderr, "run network-sandbox.exe -help for usage") }
-	configPath := flags.String("config", filepath.Join(exeDir(), "network-sandbox.ini"), "path to the config file")
+	configPath := flags.String("config", "", "path to the config file")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -89,6 +95,12 @@ func run(args []string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "network-sandbox: unexpected arguments:", flags.Args())
 		flags.Usage()
 		return 2
+	}
+	if command == "status" && *configPath == "" {
+		return statusAll(stderr)
+	}
+	if *configPath == "" {
+		*configPath = filepath.Join(exeDir(), defaultConfigName)
 	}
 	path, err := filepath.Abs(*configPath)
 	if err != nil {

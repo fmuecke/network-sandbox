@@ -88,9 +88,11 @@ network-sandbox.exe [start|stop|restart|status] [-config <path>]
 | `start` | Runs in the background. |
 | `stop` | Stops the background proxy. |
 | `restart` | Stops and starts, e.g. after editing the config. |
-| `status` | Exit code 0 if the background proxy runs, 3 if not. |
+| `status` | Lists all running proxies with their PID, listen address and config. Exit code 0 if any runs, 3 if not. |
 
 `-help`, `-?` or `/?` shows all options. The default config is `network-sandbox.ini` next to the exe. The background proxy's PID is kept in a `.pid` file next to the config.
+
+Each config has its own proxy, so you can run several side by side on different ports. `start`, `stop` and `restart` act on the proxy of the given config. `status -config <path>` checks only that config's background proxy.
 
 ## What the agent sees
 

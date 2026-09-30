@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+- Changed: `status` without `-config` lists every running proxy with its PID, listen address and
+  config, including proxies that run in a console. Before, it reported only the background proxy
+  of the default config. `status -config <path>` still checks that config's background proxy and
+  prints the same details.
+- Fixed: `status` and `stop` reported a running background proxy as "not running" after its exe
+  file was renamed or replaced, e.g. by a rebuild.
+
 ## [0.1.1] - 2026-09-30
 
 - Changed: Releases ship as `network-sandbox-<version>.zip` containing `network-sandbox.exe`,
