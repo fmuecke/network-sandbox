@@ -27,7 +27,7 @@ jobs:
         shell: pwsh
         run: ./build.ps1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: network-sandbox
           path: out/network-sandbox.exe
@@ -45,7 +45,7 @@ jobs:
       id-token: write     # sign the attestation
       attestations: write # store the attestation
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: network-sandbox
           path: out
