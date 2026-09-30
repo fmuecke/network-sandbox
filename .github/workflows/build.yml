@@ -32,3 +32,29 @@ jobs:
           name: network-sandbox
           path: out/network-sandbox.exe
           if-no-files-found: error
+
+  # On a version tag, attest the tested binary's provenance and publish it as a release.
+  # Kept separate so the write permissions never reach the job that runs the build and tests.
+  # Verify a download with: gh attestation verify network-sandbox.exe -R fmuecke/network-sandbox
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # create the release
+      id-token: write     # sign the attestation
+      attestations: write # store the attestation
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: network-sandbox
+          path: out
+
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: out/network-sandbox.exe
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" out/network-sandbox.exe --repo "$GITHUB_REPOSITORY" --generate-notes
