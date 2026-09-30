@@ -30,12 +30,19 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: network-sandbox
-          path: out/network-sandbox.exe
+          path: |
+            out/network-sandbox.exe
+            README.md
+            LICENSE
+            CHANGELOG.md
           if-no-files-found: error
 
-  # On a version tag, attest the tested binary's provenance and publish it as a release.
+  # On a version tag, bundle the tested binary with README, LICENSE and CHANGELOG, attest the
+  # provenance of the zip and the binary, and publish the zip as a release described by the
+  # tag's CHANGELOG section (a tag v1.2.0 needs a "## [1.2.0]" heading).
   # Kept separate so the write permissions never reach the job that runs the build and tests.
-  # Verify a download with: gh attestation verify network-sandbox.exe -R fmuecke/network-sandbox
+  # Verify a download (zip or extracted exe) with:
+  #   gh attestation verify <file> -R fmuecke/network-sandbox
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
@@ -48,13 +55,30 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: network-sandbox
-          path: out
+          path: dist
+
+      - name: Extract release notes
+        run: |
+          awk -v heading="## [${GITHUB_REF_NAME#v}]" \
+            'index($0, heading) == 1 { found = 1; next } found && /^## / { exit } found' \
+            dist/CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::CHANGELOG.md has no entries under '## [${GITHUB_REF_NAME#v}]'"
+            exit 1
+          fi
+          printf '\nFull changelog: %s/%s/blob/%s/CHANGELOG.md\n' \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" >> notes.md
+
+      - name: Bundle
+        run: zip -j "network-sandbox-$GITHUB_REF_NAME.zip" dist/out/network-sandbox.exe dist/README.md dist/LICENSE dist/CHANGELOG.md
 
       - uses: actions/attest-build-provenance@v4
         with:
-          subject-path: out/network-sandbox.exe
+          subject-path: |
+            network-sandbox-${{ github.ref_name }}.zip
+            dist/out/network-sandbox.exe
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" out/network-sandbox.exe --repo "$GITHUB_REPOSITORY" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" "network-sandbox-$GITHUB_REF_NAME.zip" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
