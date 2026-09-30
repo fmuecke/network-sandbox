@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.0] - 2026-09-30
 
 - Security: The proxy bounds what clients can use of it. It serves at most 256 connections at a
   time, closes tunnels and transfers without traffic for 15 minutes and idle keep-alive connections
