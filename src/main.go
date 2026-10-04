@@ -136,7 +136,7 @@ func serve(configPath string, stderr io.Writer) int {
 		return fail(stderr, err)
 	}
 	defer logFile.Close()
-	log := slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	log := slog.New(slog.NewTextHandler(io.MultiWriter(logFile, os.Stdout), &slog.HandlerOptions{Level: cfg.LogLevel}))
 
 	ln, err := net.Listen("tcp", listenAddr(cfg))
 	if err != nil {
@@ -153,8 +153,8 @@ func serve(configPath string, stderr io.Writer) int {
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 	log.Info("started", "version", version, "listen", ln.Addr().String(), "whitelist_entries", cfg.Whitelist.Len(), "config", configPath)
-	fmt.Fprintf(stderr, "network-sandbox: listening on %s, %d whitelist entries, logging to %s\n",
-		ln.Addr(), cfg.Whitelist.Len(), logFile.Name())
+	fmt.Fprintf(stderr, "network-sandbox: listening on %s, %d whitelist entries, logging to %s, config is %s\n",
+		ln.Addr(), cfg.Whitelist.Len(), logFile.Name(), configPath)
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(newLimitListener(ln, maxConnections, idleTimeout)) }()

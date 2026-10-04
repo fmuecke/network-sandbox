@@ -110,6 +110,7 @@ Validation fails closed. Any of the following prints an error to stderr and exit
 
 ## 6. Logging
 
+- In console mode, logs go to both stdout and the configured log file.
 - One line per plain-HTTP request or `CONNECT` tunnel, in Go `log/slog` text (key=value) format.
 - Fields: `time` (RFC 3339), `client`, `method`, `target` (`host:port`), `decision` (`allow`/`deny`), `status`, `bytes_up`, `bytes_down`, `duration`, `error` (if any).
 - Tunnels are logged when they close, so byte counts and duration are final.

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.1] - 2026-10-04
+
+- Changed: The full console log now goes to stdout and the rotating log file, at the configured log
+  level, if not run in background.
+
 ## [0.2.0] - 2026-09-30
 
 - Security: The proxy bounds what clients can use of it. It serves at most 256 connections at a

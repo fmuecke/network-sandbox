@@ -104,6 +104,8 @@ Each config has its own proxy, so you can run several side by side on different 
 
 ## Logs
 
+In console mode, logs go to both stdout and the configured log file.
+
 One line per request or HTTPS tunnel:
 
 ```
