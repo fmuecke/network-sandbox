@@ -1,5 +1,6 @@
 <!-- Project URL: https://github.com/fmuecke/network-sandbox -->
 
+[![build](https://github.com/fmuecke/network-sandbox/actions/workflows/build.yml/badge.svg?branch=main)](https://github.com/fmuecke/network-sandbox/actions/workflows/build.yml)
 # network-sandbox
 
 An allowlisting HTTP proxy for Windows that limits which network destinations an AI agent can reach.
