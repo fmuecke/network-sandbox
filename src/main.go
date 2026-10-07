@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // network-sandbox is a loopback-only HTTP proxy that forwards traffic to
-// whitelisted destinations only. See ../doc/spec.md.
+// allowed destinations only. See ../doc/spec.md.
 package main
 
 import (
@@ -41,7 +41,7 @@ of the GNU General Public License version 3+; see LICENSE for details.
 const defaultConfigName = "network-sandbox.json"
 
 const usage = `
-Loopback-only HTTP proxy that forwards requests to whitelisted hosts only.
+Loopback-only HTTP proxy that forwards requests to allowed hosts only.
 
 Usage: network-sandbox.exe [command] [-config <path>]
 
@@ -142,7 +142,7 @@ func serve(configPath string, stderr io.Writer) int {
 	if err != nil {
 		return fail(stderr, err)
 	}
-	proxy := NewProxy(cfg.Whitelist, cfg.AllowPrivate, log)
+	proxy := NewProxy(cfg.Allowlist, cfg.AllowPrivate, log)
 	srv := &http.Server{
 		Handler:           proxy,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -152,9 +152,9 @@ func serve(configPath string, stderr io.Writer) int {
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
-	log.Info("started", "version", version, "listen", ln.Addr().String(), "whitelist_entries", cfg.Whitelist.Len(), "config", configPath)
-	fmt.Fprintf(stderr, "network-sandbox: listening on %s, %d whitelist entries, logging to %s, config is %s\n",
-		ln.Addr(), cfg.Whitelist.Len(), logFile.Name(), configPath)
+	log.Info("started", "version", version, "listen", ln.Addr().String(), "allowlist_entries", cfg.Allowlist.Len(), "config", configPath)
+	fmt.Fprintf(stderr, "network-sandbox: listening on %s, %d allowlist entries, logging to %s, config is %s\n",
+		ln.Addr(), cfg.Allowlist.Len(), logFile.Name(), configPath)
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(newLimitListener(ln, maxConnections, idleTimeout)) }()
@@ -176,7 +176,7 @@ func serve(configPath string, stderr io.Writer) int {
 }
 
 // loadConfig loads the config. If it doesn't exist, it writes the example
-// and fails: the proxy must not start with a whitelist nobody has reviewed.
+// and fails: the proxy must not start with an allowlist nobody has reviewed.
 func loadConfig(path string) (*Config, error) {
 	cfg, err := LoadConfig(path)
 	if errors.Is(err, fs.ErrNotExist) {

@@ -17,34 +17,34 @@ type hostPort struct {
 	port uint16
 }
 
-// Whitelist holds the allowed destinations. Hostnames and IP literals are
+// Allowlist holds the allowed destinations. Hostnames and IP literals are
 // kept apart: a hostname request never matches an IP entry and vice versa.
-type Whitelist struct {
+type Allowlist struct {
 	exact     map[hostPort]bool       // github.com:443
 	wildcards map[hostPort]bool       // *.githubusercontent.com:443, stored without "*."
 	ips       map[netip.AddrPort]bool // 140.82.112.3:443, [2001:db8::1]:443
 }
 
-func newWhitelist() *Whitelist {
-	return &Whitelist{
+func newAllowlist() *Allowlist {
+	return &Allowlist{
 		exact:     map[hostPort]bool{},
 		wildcards: map[hostPort]bool{},
 		ips:       map[netip.AddrPort]bool{},
 	}
 }
 
-func (w *Whitelist) Len() int {
+func (w *Allowlist) Len() int {
 	return len(w.exact) + len(w.wildcards) + len(w.ips)
 }
 
-func (w *Whitelist) add(entry string) error {
+func (w *Allowlist) add(entry string) error {
 	host, port, err := splitHostPort(entry)
 	if err != nil {
-		return fmt.Errorf("invalid whitelist entry %q: %w", entry, err)
+		return fmt.Errorf("invalid allowlist entry %q: %w", entry, err)
 	}
 	if addr, err := netip.ParseAddr(host); err == nil {
 		if addr.Zone() != "" {
-			return fmt.Errorf("invalid whitelist entry %q: IPv6 zones are not supported", entry)
+			return fmt.Errorf("invalid allowlist entry %q: IPv6 zones are not supported", entry)
 		}
 		w.ips[netip.AddrPortFrom(addr, port)] = true
 		return nil
@@ -52,22 +52,22 @@ func (w *Whitelist) add(entry string) error {
 	if rest, ok := strings.CutPrefix(host, "*."); ok {
 		name, ok := normalizeHostname(rest)
 		if !ok {
-			return fmt.Errorf("invalid whitelist entry %q: invalid domain", entry)
+			return fmt.Errorf("invalid allowlist entry %q: invalid domain", entry)
 		}
 		w.wildcards[hostPort{name, port}] = true
 		return nil
 	}
 	name, ok := normalizeHostname(host)
 	if !ok {
-		return fmt.Errorf("invalid whitelist entry %q: invalid hostname", entry)
+		return fmt.Errorf("invalid allowlist entry %q: invalid hostname", entry)
 	}
 	w.exact[hostPort{name, port}] = true
 	return nil
 }
 
-// Check reports whether host:port is whitelisted. If so, it returns the
+// Check reports whether host:port is allowed. If so, it returns the
 // normalized address to dial, which is exactly what was matched.
-func (w *Whitelist) Check(host string, port uint16) (target string, ok bool) {
+func (w *Allowlist) Check(host string, port uint16) (target string, ok bool) {
 	if addr, err := netip.ParseAddr(host); err == nil {
 		ap := netip.AddrPortFrom(addr, port)
 		return ap.String(), w.ips[ap]

@@ -11,7 +11,7 @@ Deferred findings from the staged security, correctness, maintainability, and pe
 
 It also rejects all of `192.0.0.0/24`, including the globally reachable anycast addresses `192.0.0.9` and `192.0.0.10`.
 
-Impact: a whitelisted hostname could resolve to a special-use range routed inside the local environment, while legitimate globally reachable exceptions can be blocked.
+Impact: an allowed hostname could resolve to a special-use range routed inside the local environment, while legitimate globally reachable exceptions can be blocked.
 
 Follow-up:
 

@@ -19,7 +19,7 @@ type Config struct {
 	LogFile      string
 	LogLevel     slog.Level
 	AllowPrivate bool // hostname entries may resolve to non-public addresses
-	Whitelist    *Whitelist
+	Allowlist    *Allowlist
 }
 
 var logLevels = map[string]slog.Level{
@@ -82,7 +82,7 @@ func ParseConfig(r io.Reader) (*Config, error) {
 			target = &logLevel
 		case "privateaddresses":
 			target = &privateAddresses
-		case "whitelist":
+		case "allowed":
 			target = &entries
 		default:
 			return nil, fmt.Errorf("unknown key %q", key)
@@ -128,15 +128,15 @@ func ParseConfig(r io.Reader) (*Config, error) {
 	default:
 		return nil, errors.New("privateaddresses must be deny or allow")
 	}
-	wl := newWhitelist()
+	allowlist := newAllowlist()
 	for i, entry := range entries {
-		if err := wl.add(entry); err != nil {
-			return nil, fmt.Errorf("whitelist[%d]: %w", i, err)
+		if err := allowlist.add(entry); err != nil {
+			return nil, fmt.Errorf("allowed[%d]: %w", i, err)
 		}
 	}
-	if wl.Len() == 0 {
-		return nil, errors.New("whitelist is empty")
+	if allowlist.Len() == 0 {
+		return nil, errors.New("allowlist is empty")
 	}
-	cfg.Whitelist = wl
+	cfg.Allowlist = allowlist
 	return cfg, nil
 }

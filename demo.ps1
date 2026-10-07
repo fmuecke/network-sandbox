@@ -4,7 +4,7 @@
 #Requires -Version 7
 <#
 .SYNOPSIS
-Starts out\network-sandbox.exe with a test whitelist and sends real requests through it with curl.
+Starts out\network-sandbox.exe with a test allowlist and sends real requests through it with curl.
 
 .DESCRIPTION
 Needs internet access and a built exe (run build.ps1 first). The allowed HTTPS cases also
@@ -27,7 +27,7 @@ $log = Join-Path $work 'network-sandbox.log'
     port = $Port
     logfile = $log
     loglevel = 'info'
-    whitelist = @('api.anthropic.com:443', '*.githubusercontent.com:443', 'example.com:80')
+    allowed = @('api.anthropic.com:443', '*.githubusercontent.com:443', 'example.com:80')
 } | ConvertTo-Json | Set-Content -LiteralPath $config -Encoding utf8NoBOM
 
 $proxy = "http://127.0.0.1:$Port"
@@ -73,10 +73,10 @@ try {
         Test-Case 'HTTPS, exact entry: tunnel opens'      'https://api.anthropic.com/'        http_connect 200
         Test-Case 'HTTPS, wildcard entry: tunnel opens'   'https://raw.githubusercontent.com/' http_connect 200
         Test-Case 'HTTPS, wildcard apex: denied'          'https://githubusercontent.com/'     http_connect 403
-        Test-Case 'HTTPS, not whitelisted: denied'        'https://www.wikipedia.org/'         http_connect 403
+        Test-Case 'HTTPS, not allowed: denied'        'https://www.wikipedia.org/'         http_connect 403
         Test-Case 'HTTPS, host allowed on port 80 only'   'https://example.com/'               http_connect 403
-        Test-Case 'HTTP, whitelisted: forwarded'          'http://example.com/'                http_code 200 -BodyContains 'Example Domain'
-        Test-Case 'HTTP, not whitelisted: denied'         'http://www.wikipedia.org/'          http_code 403 -BodyContains 'not in whitelist'
+        Test-Case 'HTTP, allowed: forwarded'          'http://example.com/'                http_code 200 -BodyContains 'Example Domain'
+        Test-Case 'HTTP, not allowed: denied'         'http://www.wikipedia.org/'          http_code 403 -BodyContains 'not allowed'
         Test-Case 'HTTP, loopback via proxy: denied'      "http://127.0.0.1:$Port/"            http_code 403
         Test-Case 'Direct request to proxy: rejected'     "http://127.0.0.1:$Port/"            http_code 400 -Direct
     )

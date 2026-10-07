@@ -1,8 +1,9 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - 2026-10-07
 
-- Changed: Configuration uses JSON instead of INI for better compatibility.
+- Changed: Configuration uses JSON instead of INI for better compatibility with configuration scripts
+- Changed: Replaced term whitelist with allowlist.
 
 ## [0.2.1] - 2026-10-04
 
@@ -15,7 +16,7 @@
   time, closes tunnels and transfers without traffic for 15 minutes and idle keep-alive connections
   after 2 minutes, and rotates the log at 10 MB, keeping three old files. Before, a client could
   hold unlimited idle connections and fill the disk through the log.
-- Security: A whitelisted hostname connects to public addresses only. If it resolves to a
+- Security: An allowed hostname connects to public addresses only. If it resolves to a
   loopback, private or link-local address, the request gets `403`. The new key
   `privateaddresses=allow` restores the old behavior for networks with internal hosts. IP entries
   are unaffected.
@@ -50,10 +51,10 @@
 ## [0.1.0] - 2026-09-30
 
 - Added: Allowlisting HTTP proxy on `127.0.0.1`. It forwards plain-HTTP requests and HTTPS tunnels
-  to whitelisted `host:port` pairs only and answers everything else with `403 Forbidden`.
-- Added: INI configuration. Whitelist entries match exact hosts, `*.` subdomains, or literal IPv4
+  to allowed `host:port` pairs only and answers everything else with `403 Forbidden`.
+- Added: INI configuration. Allowlist entries match exact hosts, `*.` subdomains, or literal IPv4
   and IPv6 addresses. The proxy refuses to start on unknown keys, malformed entries, or an empty
-  whitelist; without a config, it writes an example next to the exe.
+  allowlist; without a config, it writes an example next to the exe.
 - Added: One log line per request or tunnel with its decision, status, and byte counts.
   `loglevel=debug` also logs plain-HTTP URLs and headers, with credentials redacted.
 - Added: `start`, `stop`, `restart`, and `status` run and control the proxy in the background.

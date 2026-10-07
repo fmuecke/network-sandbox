@@ -33,7 +33,7 @@ func TestBackgroundCommands(t *testing.T) {
 	addr := ln.Addr().String()
 	ln.Close()
 	config := filepath.Join(dir, "background.json")
-	os.WriteFile(config, []byte(fmt.Sprintf(`{"port":%s,"logfile":%q,"whitelist":["github.com:443"]}`,
+	os.WriteFile(config, []byte(fmt.Sprintf(`{"port":%s,"logfile":%q,"allowed":["github.com:443"]}`,
 		addr[strings.LastIndex(addr, ":")+1:], filepath.Join(dir, "sandbox.log"))), 0o600)
 
 	cmd := func(command string) (int, string) {
@@ -81,7 +81,7 @@ func TestBackgroundCommands(t *testing.T) {
 	}
 	consoleAddr := ln.Addr().String()
 	ln.Close()
-	os.WriteFile(filepath.Join(dir, defaultConfigName), []byte(fmt.Sprintf(`{"port":%s,"logfile":%q,"whitelist":["github.com:443"]}`,
+	os.WriteFile(filepath.Join(dir, defaultConfigName), []byte(fmt.Sprintf(`{"port":%s,"logfile":%q,"allowed":["github.com:443"]}`,
 		consoleAddr[strings.LastIndex(consoleAddr, ":")+1:], filepath.Join(dir, "console.log"))), 0o600)
 	console := exec.Command(exe)
 	if err := console.Start(); err != nil {

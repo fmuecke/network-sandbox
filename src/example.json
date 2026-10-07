@@ -3,7 +3,7 @@
   "logfile": "network-sandbox.log",
   "loglevel": "info",
   "privateaddresses": "deny",
-  "whitelist": [
+  "allowed": [
     "api.anthropic.com:443",
     "claude.ai:443",
     "platform.claude.com:443",

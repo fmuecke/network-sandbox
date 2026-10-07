@@ -5,8 +5,8 @@ package main
 
 import "testing"
 
-func TestWhitelistCheck(t *testing.T) {
-	wl := newWhitelist()
+func TestAllowlistCheck(t *testing.T) {
+	allowlist := newAllowlist()
 	for _, e := range []string{
 		"github.com:443",
 		"*.githubusercontent.com:443",
@@ -14,7 +14,7 @@ func TestWhitelistCheck(t *testing.T) {
 		"[2001:db8::1]:443",
 		"Example.ORG.:80",
 	} {
-		if err := wl.add(e); err != nil {
+		if err := allowlist.add(e); err != nil {
 			t.Fatalf("add(%q): %v", e, err)
 		}
 	}
@@ -44,28 +44,28 @@ func TestWhitelistCheck(t *testing.T) {
 		{"*.githubusercontent.com", 443, ""},
 	}
 	for _, tt := range tests {
-		target, ok := wl.Check(tt.host, tt.port)
+		target, ok := allowlist.Check(tt.host, tt.port)
 		if ok != (tt.target != "") || (ok && target != tt.target) {
 			t.Errorf("Check(%q, %d) = %q, %v; want %q", tt.host, tt.port, target, ok, tt.target)
 		}
 	}
 }
 
-func TestWhitelistIPAndHostnameAreSeparate(t *testing.T) {
-	wl := newWhitelist()
-	wl.add("1.2.3.4:443")
-	wl.add("*.4:443") // a wildcard over a numeric label must not match an IP literal
-	if _, ok := wl.Check("1.2.3.4", 443); !ok {
+func TestAllowlistIPAndHostnameAreSeparate(t *testing.T) {
+	allowlist := newAllowlist()
+	allowlist.add("1.2.3.4:443")
+	allowlist.add("*.4:443") // a wildcard over a numeric label must not match an IP literal
+	if _, ok := allowlist.Check("1.2.3.4", 443); !ok {
 		t.Error("IP entry should match the IP literal")
 	}
-	wl = newWhitelist()
-	wl.add("*.4:443")
-	if _, ok := wl.Check("1.2.3.4", 443); ok {
+	allowlist = newAllowlist()
+	allowlist.add("*.4:443")
+	if _, ok := allowlist.Check("1.2.3.4", 443); ok {
 		t.Error("hostname wildcard matched an IP literal")
 	}
 }
 
-func TestWhitelistInvalidEntries(t *testing.T) {
+func TestAllowlistInvalidEntries(t *testing.T) {
 	for _, e := range []string{
 		"github.com",
 		"github.com:0",
@@ -82,7 +82,7 @@ func TestWhitelistInvalidEntries(t *testing.T) {
 		"github..com:443",
 		"[fe80::1%eth0]:443",
 	} {
-		if err := newWhitelist().add(e); err == nil {
+		if err := newAllowlist().add(e); err == nil {
 			t.Errorf("add(%q) accepted an invalid entry", e)
 		}
 	}

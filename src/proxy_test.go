@@ -69,14 +69,14 @@ func startProxy(t *testing.T, entries ...string) (*httptest.Server, *syncBuffer)
 // listener as in production.
 func startProxyWith(t *testing.T, configure func(*Proxy), entries ...string) (*httptest.Server, *syncBuffer) {
 	t.Helper()
-	wl := newWhitelist()
+	allowlist := newAllowlist()
 	for _, e := range entries {
-		if err := wl.add(e); err != nil {
+		if err := allowlist.add(e); err != nil {
 			t.Fatal(err)
 		}
 	}
 	logs := &syncBuffer{}
-	p := NewProxy(wl, false, slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	p := NewProxy(allowlist, false, slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	configure(p)
 	srv := httptest.NewUnstartedServer(p)
 	srv.Listener = newLimitListener(srv.Listener, maxConnections, p.idleTimeout)
@@ -272,7 +272,7 @@ func TestDenied(t *testing.T) {
 	proxy, logs := startProxy(t, "github.com:443")
 
 	resp, body := rawConnect(t, proxy, "example.com:443")
-	if resp.StatusCode != 403 || !strings.Contains(body, "network-sandbox: example.com:443 not in whitelist") {
+	if resp.StatusCode != 403 || !strings.Contains(body, "network-sandbox: example.com:443 not allowed") {
 		t.Errorf("CONNECT: got %d %q", resp.StatusCode, body)
 	}
 	logs.waitForLog(t, "method=CONNECT", "target=example.com:443", "decision=deny", "status=403")
@@ -288,7 +288,7 @@ func TestDenied(t *testing.T) {
 	}
 	b, _ := io.ReadAll(r.Body)
 	r.Body.Close()
-	if r.StatusCode != 403 || !strings.Contains(string(b), "example.com:80 not in whitelist") {
+	if r.StatusCode != 403 || !strings.Contains(string(b), "example.com:80 not allowed") {
 		t.Errorf("HTTP: got %d %q", r.StatusCode, b)
 	}
 	logs.waitForLog(t, "method=GET", "target=example.com:80", "decision=deny", "status=403")
@@ -335,13 +335,13 @@ func TestUpstreamUnreachable(t *testing.T) {
 
 func TestRunInvalidConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "invalid.json")
-	content := []byte(`{"port":8080,"whitelist":[]}`)
+	content := []byte(`{"port":8080,"allowed":[]}`)
 	os.WriteFile(path, content, 0o600)
 	var stderr bytes.Buffer
 	if code := run([]string{"-config", path}, &stderr); code == 0 {
 		t.Error("exit code 0")
 	}
-	if !strings.Contains(stderr.String(), "whitelist is empty") {
+	if !strings.Contains(stderr.String(), "allowlist is empty") {
 		t.Errorf("no error message: %q", stderr.String())
 	}
 	if got, _ := os.ReadFile(path); !bytes.Equal(got, content) {

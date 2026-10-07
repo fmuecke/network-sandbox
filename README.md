@@ -5,7 +5,7 @@
 
 An allowlisting HTTP proxy for Windows that limits which network destinations an AI agent can reach.
 
-It listens on `127.0.0.1` only, forwards requests to whitelisted hosts, blocks everything else, and logs every decision. It's a single `.exe`: no installer, no dependencies, no admin rights.
+It listens on `127.0.0.1` only, forwards requests to allowed hosts, blocks everything else, and logs every decision. It's a single `.exe`: no installer, no dependencies, no admin rights.
 
 ## Why
 
@@ -30,7 +30,7 @@ agent (restricted user) ──► network-sandbox (127.0.0.1:8080) ──► api
    .\out\network-sandbox.exe
    ```
 
-3. Edit the whitelist in `out\network-sandbox.json`, then start the proxy in the background:
+3. Edit the allowlist in `out\network-sandbox.json`, then start the proxy in the background:
 
    ```powershell
    .\out\network-sandbox.exe start
@@ -54,17 +54,15 @@ agent (restricted user) ──► network-sandbox (127.0.0.1:8080) ──► api
   "logfile": "network-sandbox.log",
   "loglevel": "info",
   "privateaddresses": "deny",
-  "whitelist": [
+  "allowed": [
     "api.anthropic.com:443",
-    "claude.ai:443",
-    "github.com:443",
-    "*.githubusercontent.com:443"
+    "claude.ai:443"
   ]
 }
 ```
 
 The config is a UTF-8 JSON object. `port` is required (integer, 1–65535), and
-`whitelist` is a required nonempty array of strings. Optional settings:
+`allowed` is a required nonempty array of strings. Optional settings:
 
 | Key | Default | Values |
 |---|---|---|
@@ -72,7 +70,7 @@ The config is a UTF-8 JSON object. `port` is required (integer, 1–65535), and
 | `loglevel` | `info` | `error`, `warn`, `info`, `debug` |
 | `privateaddresses` | `deny` | `deny`, `allow` |
 
-Whitelist entries:
+Allowlist entries:
 
 | Entry | Allows |
 |---|---|
@@ -88,7 +86,7 @@ Whitelist entries:
 - JSON keys are case-sensitive. Comments and trailing commas are not supported.
 - Escape backslashes in Windows paths, e.g. `"logfile": "C:\\logs\\proxy.log"`.
 
-The proxy refuses to start on unknown or duplicate keys, invalid values, malformed entries or an empty whitelist. Config changes take effect after a restart.
+The proxy refuses to start on unknown or duplicate keys, invalid values, malformed entries or an empty allowlist. Config changes take effect after a restart.
 
 ## Commands
 
@@ -111,7 +109,7 @@ Each config has its own proxy, so you can run several side by side on different 
 ## What the agent sees
 
 - **Allowed:** the request goes through unchanged.
-- **Blocked:** `403 Forbidden` with the reason, e.g. `network-sandbox: example.com:443 not in whitelist` or `... resolves to a non-public address`. Browsers show a generic tunnel error for blocked HTTPS instead.
+- **Blocked:** `403 Forbidden` with the reason, e.g. `network-sandbox: example.com:443 not allowed` or `... resolves to a non-public address`. Browsers show a generic tunnel error for blocked HTTPS instead.
 - **Target unreachable:** `502 Bad Gateway`.
 
 ## Logs
@@ -173,9 +171,9 @@ The proxy contains an agent only together with these:
 ## Limitations
 
 - For HTTPS, the proxy controls only `host:port`, not paths or content. It doesn't check the TLS server name either: where several sites share servers (a CDN), a tunnel to an allowed host can ask for another site on them.
-- Allowed hosts can still carry data out, e.g. by pushing to GitHub. Keep the whitelist short.
+- Allowed hosts can still carry data out, e.g. by pushing to GitHub. Keep the allowlist short.
 - DNS lookups made directly through the Windows DNS service aren't covered.
-- Any local process can use the proxy; there is no authentication. It only ever grants whitelisted access.
+- Any local process can use the proxy; there is no authentication. It grants access only to destinations on the allowlist.
 - At most 256 connections at a time; further clients wait. A tunnel or transfer without traffic for 15 minutes is closed. A client can still use up these limits, or flood the log until older entries rotate out.
 - No SOCKS, no UDP, no Windows service.
 

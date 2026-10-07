@@ -25,9 +25,9 @@ const (
 	readHeaderTimeout = 30 * time.Second
 )
 
-// Proxy is an HTTP proxy that only reaches whitelisted destinations.
+// Proxy is an HTTP proxy that only reaches allowed destinations.
 type Proxy struct {
-	whitelist    *Whitelist
+	allowlist    *Allowlist
 	allowPrivate bool // hostnames may resolve to non-public addresses
 	idleTimeout  time.Duration
 	log          *slog.Logger
@@ -49,9 +49,9 @@ type record struct {
 
 type recordKey struct{}
 
-func NewProxy(wl *Whitelist, allowPrivate bool, log *slog.Logger) *Proxy {
+func NewProxy(allowlist *Allowlist, allowPrivate bool, log *slog.Logger) *Proxy {
 	p := &Proxy{
-		whitelist:    wl,
+		allowlist:    allowlist,
 		allowPrivate: allowPrivate,
 		idleTimeout:  idleTimeout,
 		log:          log,
@@ -121,9 +121,9 @@ func (p *Proxy) tunnel(w http.ResponseWriter, r *http.Request, rec *record) {
 		p.reject(w, rec, http.StatusBadRequest, "network-sandbox: invalid CONNECT target")
 		return
 	}
-	target, ok := p.whitelist.Check(host, port)
+	target, ok := p.allowlist.Check(host, port)
 	if !ok {
-		p.reject(w, rec, http.StatusForbidden, fmt.Sprintf("network-sandbox: %s not in whitelist", r.Host))
+		p.reject(w, rec, http.StatusForbidden, fmt.Sprintf("network-sandbox: %s not allowed", r.Host))
 		return
 	}
 	rec.target, rec.decision = target, "allow"
@@ -193,9 +193,9 @@ func (p *Proxy) forwardHTTP(w http.ResponseWriter, r *http.Request, rec *record)
 		return
 	}
 	rec.target = net.JoinHostPort(r.URL.Hostname(), portStr)
-	target, ok := p.whitelist.Check(r.URL.Hostname(), port)
+	target, ok := p.allowlist.Check(r.URL.Hostname(), port)
 	if !ok {
-		p.reject(w, rec, http.StatusForbidden, fmt.Sprintf("network-sandbox: %s not in whitelist", rec.target))
+		p.reject(w, rec, http.StatusForbidden, fmt.Sprintf("network-sandbox: %s not allowed", rec.target))
 		return
 	}
 	rec.target, rec.decision = target, "allow"
@@ -217,10 +217,10 @@ func nonPublicMessage(target string) string {
 	return fmt.Sprintf("network-sandbox: %s resolves to a non-public address", target)
 }
 
-// dial connects to a whitelisted target. A hostname is resolved here, by the
+// dial connects to an allowed target. A hostname is resolved here, by the
 // system resolver, and must lead to a public address: otherwise a DNS answer
 // could point an allowed name at loopback or the local network. An IP literal
-// was whitelisted as such and is dialed as it is.
+// was allowed as such and is dialed as it is.
 func (p *Proxy) dial(ctx context.Context, network, target string) (net.Conn, error) {
 	dialer := net.Dialer{Timeout: dialTimeout}
 	host, _, _ := net.SplitHostPort(target)
