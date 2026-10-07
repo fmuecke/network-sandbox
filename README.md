@@ -24,13 +24,13 @@ agent (restricted user) ──► network-sandbox (127.0.0.1:8080) ──► api
    ./build.ps1          # runs all tests and creates out\network-sandbox.exe
    ```
 
-2. Run it once. Without a config, it writes an example `network-sandbox.ini` next to the exe and exits:
+2. Run it once. Without a config, it writes an example `network-sandbox.json` next to the exe and exits:
 
    ```powershell
    .\out\network-sandbox.exe
    ```
 
-3. Edit the whitelist in `out\network-sandbox.ini`, then start the proxy in the background:
+3. Edit the whitelist in `out\network-sandbox.json`, then start the proxy in the background:
 
    ```powershell
    .\out\network-sandbox.exe start
@@ -48,21 +48,31 @@ agent (restricted user) ──► network-sandbox (127.0.0.1:8080) ──► api
 
 ## Configuration
 
-```ini
-[network-sandbox]
-port=8080                      # required, 1-65535
-logfile=network-sandbox.log    # optional; relative paths resolve next to the exe
-loglevel=info                  # optional: error | warn | info | debug
-privateaddresses=deny          # optional: deny | allow
-
-[whitelist]
-api.anthropic.com:443
-claude.ai:443
-github.com:443
-*.githubusercontent.com:443
+```json
+{
+  "port": 8080,
+  "logfile": "network-sandbox.log",
+  "loglevel": "info",
+  "privateaddresses": "deny",
+  "whitelist": [
+    "api.anthropic.com:443",
+    "claude.ai:443",
+    "github.com:443",
+    "*.githubusercontent.com:443"
+  ]
+}
 ```
 
-Whitelist entries, one per line:
+The config is a UTF-8 JSON object. `port` is required (integer, 1–65535), and
+`whitelist` is a required nonempty array of strings. Optional settings:
+
+| Key | Default | Values |
+|---|---|---|
+| `logfile` | `network-sandbox.log` | Nonempty path; relative paths resolve next to the exe |
+| `loglevel` | `info` | `error`, `warn`, `info`, `debug` |
+| `privateaddresses` | `deny` | `deny`, `allow` |
+
+Whitelist entries:
 
 | Entry | Allows |
 |---|---|
@@ -74,10 +84,11 @@ Whitelist entries, one per line:
 - The port is required. To allow a host on both 80 and 443, list it twice.
 - Matching ignores case and a trailing dot.
 - A request for `github.com` never matches an IP entry, even if the name resolves to that IP.
-- A hostname entry connects to public addresses only. If the name resolves to a loopback, private or link-local address, the request gets `403`, so DNS can't point an allowed name at your machine or local network. For internal hosts, set `privateaddresses=allow`, which lifts this for all hostname entries. IP entries are always connected as written.
-- `#` or `;` start a comment.
+- A hostname entry connects to public addresses only. If the name resolves to a loopback, private or link-local address, the request gets `403`, so DNS can't point an allowed name at your machine or local network. For internal hosts, set `"privateaddresses": "allow"`, which lifts this for all hostname entries. IP entries are always connected as written.
+- JSON keys are case-sensitive. Comments and trailing commas are not supported.
+- Escape backslashes in Windows paths, e.g. `"logfile": "C:\\logs\\proxy.log"`.
 
-The proxy refuses to start on unknown keys, malformed entries or an empty whitelist. Config changes take effect after a restart.
+The proxy refuses to start on unknown or duplicate keys, invalid values, malformed entries or an empty whitelist. Config changes take effect after a restart.
 
 ## Commands
 
@@ -93,7 +104,7 @@ network-sandbox.exe [start|stop|restart|status] [-config <path>]
 | `restart` | Stops and starts, e.g. after editing the config. |
 | `status` | Lists all running proxies with their PID, listen address and config. Exit code 0 if any runs, 3 if not. |
 
-`-help`, `-?` or `/?` shows all options. The default config is `network-sandbox.ini` next to the exe. The background proxy is recorded in `<config>.pid` next to the config, e.g. `network-sandbox.ini.pid`.
+`-help`, `-?` or `/?` shows all options. The default config is `network-sandbox.json` next to the exe. The background proxy is recorded in `<config>.pid` next to the config, e.g. `network-sandbox.json.pid`.
 
 Each config has its own proxy, so you can run several side by side on different ports. `start`, `stop` and `restart` act on the proxy of the given config. `status -config <path>` checks only that config's background proxy.
 
@@ -114,7 +125,7 @@ time=2026-09-30T06:23:36.019+02:00 level=INFO msg=request client=127.0.0.1:60273
 time=2026-09-30T06:23:36.200+02:00 level=INFO msg=request client=127.0.0.1:60278 method=CONNECT target=www.wikipedia.org:443 decision=deny status=403 bytes_up=0 bytes_down=0 duration=0s
 ```
 
-To find out which hosts a tool needs, run it through the proxy and look for `decision=deny`. With `loglevel=debug`, plain-HTTP requests also log their URL and headers. The URL is logged without user info and query string, and only a few harmless header values (such as `Content-Type` and `User-Agent`) are shown; a secret in the URL path would still be logged.
+To find out which hosts a tool needs, run it through the proxy and look for `decision=deny`. With `"loglevel": "debug"`, plain-HTTP requests also log their URL and headers. The URL is logged without user info and query string, and only a few harmless header values (such as `Content-Type` and `User-Agent`) are shown; a secret in the URL path would still be logged.
 
 The log rotates at 10 MB and keeps the three previous files (`.1` to `.3`), so it never takes more than 40 MB. Give each config its own `logfile`.
 

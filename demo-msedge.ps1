@@ -1,4 +1,4 @@
-.\out\network-sandbox.exe start     # first run creates out\network-sandbox.ini; edit it, then start again
+.\out\network-sandbox.exe start     # first run creates out\network-sandbox.json; edit it, then start again
 
 & "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" `
     --user-data-dir="$env:TEMP\edge-sandbox" `

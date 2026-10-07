@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Changed: Configuration uses JSON instead of INI for better compatibility.
+
 ## [0.2.1] - 2026-10-04
 
 - Changed: The full console log now goes to stdout and the rotating log file, at the configured log

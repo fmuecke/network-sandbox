@@ -191,7 +191,7 @@ func TestHostnameResolvingToNonPublicAddress(t *testing.T) {
 	b, _ = io.ReadAll(r.Body)
 	r.Body.Close()
 	if r.StatusCode != 200 || string(b) != "hello" {
-		t.Errorf("privateaddresses=allow: got %d %q", r.StatusCode, b)
+		t.Errorf("privateaddresses: allow: got %d %q", r.StatusCode, b)
 	}
 }
 
@@ -334,8 +334,8 @@ func TestUpstreamUnreachable(t *testing.T) {
 }
 
 func TestRunInvalidConfig(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "invalid.ini")
-	content := []byte("[network-sandbox]\nport=8080\n[whitelist]\n")
+	path := filepath.Join(t.TempDir(), "invalid.json")
+	content := []byte(`{"port":8080,"whitelist":[]}`)
 	os.WriteFile(path, content, 0o600)
 	var stderr bytes.Buffer
 	if code := run([]string{"-config", path}, &stderr); code == 0 {
@@ -350,7 +350,7 @@ func TestRunInvalidConfig(t *testing.T) {
 }
 
 func TestRunMissingConfigCreatesExample(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "network-sandbox.ini")
+	path := filepath.Join(t.TempDir(), "network-sandbox.json")
 	var stderr bytes.Buffer
 	if code := run([]string{"-config", path}, &stderr); code == 0 {
 		t.Error("exit code 0: the proxy must not start with an unreviewed example")
@@ -364,7 +364,7 @@ func TestRunMissingConfigCreatesExample(t *testing.T) {
 }
 
 func TestRunMissingConfigDirFails(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "no-such-dir", "network-sandbox.ini")
+	path := filepath.Join(t.TempDir(), "no-such-dir", "network-sandbox.json")
 	var stderr bytes.Buffer
 	if code := run([]string{"-config", path}, &stderr); code == 0 {
 		t.Error("exit code 0")

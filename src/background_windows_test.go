@@ -32,8 +32,8 @@ func TestBackgroundCommands(t *testing.T) {
 	}
 	addr := ln.Addr().String()
 	ln.Close()
-	config := filepath.Join(dir, "background.ini")
-	os.WriteFile(config, []byte(fmt.Sprintf("[network-sandbox]\nport=%s\nlogfile=%s\n[whitelist]\ngithub.com:443\n",
+	config := filepath.Join(dir, "background.json")
+	os.WriteFile(config, []byte(fmt.Sprintf(`{"port":%s,"logfile":%q,"whitelist":["github.com:443"]}`,
 		addr[strings.LastIndex(addr, ":")+1:], filepath.Join(dir, "sandbox.log"))), 0o600)
 
 	cmd := func(command string) (int, string) {
@@ -81,7 +81,7 @@ func TestBackgroundCommands(t *testing.T) {
 	}
 	consoleAddr := ln.Addr().String()
 	ln.Close()
-	os.WriteFile(filepath.Join(dir, defaultConfigName), []byte(fmt.Sprintf("[network-sandbox]\nport=%s\nlogfile=%s\n[whitelist]\ngithub.com:443\n",
+	os.WriteFile(filepath.Join(dir, defaultConfigName), []byte(fmt.Sprintf(`{"port":%s,"logfile":%q,"whitelist":["github.com:443"]}`,
 		consoleAddr[strings.LastIndex(consoleAddr, ":")+1:], filepath.Join(dir, "console.log"))), 0o600)
 	console := exec.Command(exe)
 	if err := console.Start(); err != nil {
@@ -178,7 +178,7 @@ func TestBackgroundCommands(t *testing.T) {
 }
 
 func TestPIDFilePath(t *testing.T) {
-	if pidFilePath(`C:\dir\policy.ini`) == pidFilePath(`C:\dir\policy.conf`) {
+	if pidFilePath(`C:\dir\policy.json`) == pidFilePath(`C:\dir\policy.conf`) {
 		t.Error("configs that differ in the extension share a PID file")
 	}
 	if config := `C:\dir\policy.pid`; pidFilePath(config) == config {
@@ -188,11 +188,11 @@ func TestPIDFilePath(t *testing.T) {
 
 func TestCommandLineArgs(t *testing.T) {
 	for in, want := range map[string]string{
-		`"C:\my dir\network-sandbox.exe" -config "C:\my dir\a.ini"`: `-config "C:\my dir\a.ini"`,
-		`C:\dir\network-sandbox.exe -config C:\dir\a.ini`:           `-config C:\dir\a.ini`,
-		`"C:\dir\network-sandbox.exe"`:                              "",
-		`network-sandbox.exe`:                                       "",
-		``:                                                          "",
+		`"C:\my dir\network-sandbox.exe" -config "C:\my dir\a.json"`: `-config "C:\my dir\a.json"`,
+		`C:\dir\network-sandbox.exe -config C:\dir\a.json`:           `-config C:\dir\a.json`,
+		`"C:\dir\network-sandbox.exe"`:                               "",
+		`network-sandbox.exe`:                                        "",
+		``:                                                           "",
 	} {
 		if got := commandLineArgs(in); got != want {
 			t.Errorf("commandLineArgs(%q) = %q, want %q", in, got, want)

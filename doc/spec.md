@@ -50,36 +50,35 @@ Inspired by [GO Simple Tunnel](https://github.com/go-gost/gost), but as simple a
 
 ## 4. Config file
 
-INI format. Default path: `network-sandbox.ini` next to the executable.
+UTF-8 JSON format. Default path: `network-sandbox.json` next to the executable.
 
 If the config file doesn't exist, the proxy writes the example below to that path and exits with a nonzero code instead of starting. It never starts with a whitelist nobody has reviewed, and it never overwrites an existing file.
 
-```ini
-[network-sandbox]
-port=8080                      # required, 1-65535
-logfile=network-sandbox.log    # optional; relative paths resolve next to the exe
-loglevel=info                  # optional: error | warn | info | debug
-privateaddresses=deny          # optional: deny | allow - whether whitelisted hostnames may resolve
-                               # to loopback, private or link-local addresses
-
-[whitelist]
-# Claude
-api.anthropic.com:443
-claude.ai:443
-platform.claude.com:443
-downloads.claude.ai:443
-# Microsoft
-microsoft.com:443
-# GitHub
-github.com:443
-*.githubusercontent.com:443
+```json
+{
+  "port": 8080,
+  "logfile": "network-sandbox.log",
+  "loglevel": "info",
+  "privateaddresses": "deny",
+  "whitelist": [
+    "api.anthropic.com:443",
+    "claude.ai:443",
+    "platform.claude.com:443",
+    "downloads.claude.ai:443",
+    "microsoft.com:443"
+  ]
+}
 ```
 
 Syntax:
 
-- Two sections: `[network-sandbox]` and `[whitelist]`. Section and key names are case-insensitive.
-- `#` or `;` start a comment, either on its own line or after whitespace at the end of a line. Blank lines are ignored.
-- `[whitelist]` holds one entry per line:
+- One object with case-sensitive keys. Comments and trailing commas are not supported. An initial UTF-8 BOM is accepted.
+- `port`: required integer from 1 to 65535.
+- `logfile`: optional nonempty string, defaults to `network-sandbox.log`; relative paths resolve next to the executable. Escape Windows path backslashes, e.g. `"C:\\logs\\proxy.log"`.
+- `loglevel`: optional string, `error`, `warn`, `info` (default), or `debug`.
+- `privateaddresses`: optional string, `deny` (default) or `allow`. This controls whether whitelisted hostnames may resolve to non-public addresses.
+- `loglevel` and `privateaddresses` values are case-insensitive.
+- `whitelist`: required nonempty array of strings:
 
   | Form | Example | Matches |
   |---|---|---|
@@ -94,7 +93,8 @@ Syntax:
 Validation fails closed. Any of the following prints an error to stderr and exits with a nonzero code:
 
 - missing or invalid `port`, or an invalid value of another key
-- unknown section or key
+- unknown or duplicate key
+- invalid JSON, trailing data, wrong value type or `null` value
 - malformed whitelist entry
 - empty whitelist
 - log file that can't be opened
@@ -102,7 +102,7 @@ Validation fails closed. Any of the following prints an error to stderr and exit
 ## 5. Matching and security rules
 
 - Match the host string the client *requested*, never the IP it resolves to. The proxy resolves DNS through the system resolver, so the agent needs no DNS access.
-- A hostname entry connects to public addresses only: not loopback, private (RFC 1918, unique local), link-local, carrier-grade NAT, multicast or reserved addresses. Otherwise a DNS answer could point an allowed name at the proxy's machine or the local network. The check applies to the address of each connection attempt, so a name that resolves differently the next time (DNS rebinding) can't pass it. A failed check is logged as `deny` with the error. `privateaddresses=allow` turns the check off for all hostname entries, for networks with internal hosts.
+- A hostname entry connects to public addresses only: not loopback, private (RFC 1918, unique local), link-local, carrier-grade NAT, multicast or reserved addresses. Otherwise a DNS answer could point an allowed name at the proxy's machine or the local network. The check applies to the address of each connection attempt, so a name that resolves differently the next time (DNS rebinding) can't pass it. A failed check is logged as `deny` with the error. `"privateaddresses": "allow"` turns the check off for all hostname entries, for networks with internal hosts.
 - An IP entry names its address explicitly and is connected as written, public or not.
 - Normalize before matching: lowercase, and strip one trailing dot.
 - An IP-literal request matches IP entries only. A hostname request never matches IP entries.
@@ -134,7 +134,7 @@ Validation fails closed. Any of the following prints an error to stderr and exit
   | `restart` | `stop`, then `start`, as one step. Use it to apply config changes. |
   | `status` | Without `-config`: lists every running proxy as `running (pid <pid>) on <listen address> -config <path>`. It reads the process list, so it includes proxies that run in a console. Exits with 0 if any runs, or 3 if none. With `-config`: prints the same line for that config's background proxy, found through its PID file, and exits with 0 if it runs, or 3 if not. |
 
-  Each config has its own PID file and so its own background proxy; `start`, `stop` and `restart` act on the proxy of the given config (by default `network-sandbox.ini` next to the executable). The PID file is the config path plus `.pid`, e.g. `network-sandbox.ini.pid`, so two configs never share one and it never coincides with a config.
+  Each config has its own PID file and so its own background proxy; `start`, `stop` and `restart` act on the proxy of the given config (by default `network-sandbox.json` next to the executable). The PID file is the config path plus `.pid`, e.g. `network-sandbox.json.pid`, so two configs never share one and it never coincides with a config.
 
   `start`, `stop` and `restart` of the same config run one at a time. They hold `<config>.pid.lock` open while they run; a command that can't get it within 30 s fails.
 
@@ -212,7 +212,7 @@ Whitelist matching is unaffected, because the proxy matches the `CONNECT` target
 - non-whitelisted targets return `403` with the documented body
 - origin-form requests return `400`
 - log lines are written with the documented fields, and debug lines hold no credentials
-- a whitelisted hostname that resolves to loopback returns `403`, unless `privateaddresses=allow`
+- a whitelisted hostname that resolves to loopback returns `403`, unless `"privateaddresses": "allow"`
 - idle tunnels and stalled transfers are closed, while one-way traffic keeps a tunnel open
 - connections beyond the limit wait, and the log rotates within its bound
 - concurrent `start` commands start one proxy

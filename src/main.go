@@ -26,7 +26,7 @@ import (
 	_ "embed"
 )
 
-//go:embed example.ini
+//go:embed example.json
 var exampleConfig []byte
 
 // version is set at build time: go build -ldflags "-X main.version=..."
@@ -38,7 +38,7 @@ of the GNU General Public License version 3+; see LICENSE for details.
 `
 
 // defaultConfigName is the config file used, next to the exe, without -config.
-const defaultConfigName = "network-sandbox.ini"
+const defaultConfigName = "network-sandbox.json"
 
 const usage = `
 Loopback-only HTTP proxy that forwards requests to whitelisted hosts only.
@@ -54,7 +54,7 @@ Commands:
             proxy of that config only
 
 Options:
-  -config <path>   config file (default: network-sandbox.ini next to the exe).
+  -config <path>   config file (default: network-sandbox.json next to the exe).
                    If it doesn't exist, an example is created there.
                    Each config has its own proxy: start, stop and restart
                    act on the proxy of this config.

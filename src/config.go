@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,98 +42,101 @@ func LoadConfig(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// ParseConfig reads the INI config. Anything unexpected is an error: the
+// ParseConfig reads one JSON object. Anything unexpected is an error: the
 // proxy must not start with a config it only partly understood.
 func ParseConfig(r io.Reader) (*Config, error) {
-	cfg := &Config{LogFile: "network-sandbox.log", LogLevel: slog.LevelInfo}
-	wl := newWhitelist()
-	seen := map[string]bool{}
-	section := ""
-
-	sc := bufio.NewScanner(r)
-	for n := 1; sc.Scan(); n++ {
-		text := sc.Text()
-		if n == 1 {
-			text = strings.TrimPrefix(text, string(rune(0xFEFF))) // UTF-8 BOM written by Notepad
-		}
-		line := strings.TrimSpace(stripComment(text))
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			section = strings.ToLower(strings.TrimSpace(line[1 : len(line)-1]))
-			if section != "network-sandbox" && section != "whitelist" {
-				return nil, fmt.Errorf("line %d: unknown section [%s]", n, section)
-			}
-			continue
-		}
-		switch section {
-		case "network-sandbox":
-			key, value, ok := strings.Cut(line, "=")
-			if !ok {
-				return nil, fmt.Errorf("line %d: expected key=value", n)
-			}
-			key, value = strings.ToLower(strings.TrimSpace(key)), strings.TrimSpace(value)
-			if seen[key] {
-				return nil, fmt.Errorf("line %d: duplicate key %q", n, key)
-			}
-			seen[key] = true
-			switch key {
-			case "port":
-				port, err := parsePort(value)
-				if err != nil {
-					return nil, fmt.Errorf("line %d: %w", n, err)
-				}
-				cfg.Port = port
-			case "logfile":
-				if value == "" {
-					return nil, fmt.Errorf("line %d: logfile is empty", n)
-				}
-				cfg.LogFile = value
-			case "loglevel":
-				level, ok := logLevels[strings.ToLower(value)]
-				if !ok {
-					return nil, fmt.Errorf("line %d: loglevel must be error, warn, info or debug", n)
-				}
-				cfg.LogLevel = level
-			case "privateaddresses":
-				switch strings.ToLower(value) {
-				case "allow":
-					cfg.AllowPrivate = true
-				case "deny":
-				default:
-					return nil, fmt.Errorf("line %d: privateaddresses must be deny or allow", n)
-				}
-			default:
-				return nil, fmt.Errorf("line %d: unknown key %q", n, key)
-			}
-		case "whitelist":
-			if err := wl.add(line); err != nil {
-				return nil, fmt.Errorf("line %d: %w", n, err)
-			}
-		default:
-			return nil, fmt.Errorf("line %d: entry outside of a section", n)
-		}
+	reader := bufio.NewReader(r)
+	if bom, _ := reader.Peek(3); string(bom) == "\xef\xbb\xbf" {
+		reader.Discard(3) // UTF-8 BOM written by Notepad
 	}
-	if err := sc.Err(); err != nil {
+	dec := json.NewDecoder(reader)
+	token, err := dec.Token()
+	if err != nil {
 		return nil, err
 	}
+	if token != json.Delim('{') {
+		return nil, errors.New("config must be a JSON object")
+	}
+
+	cfg := &Config{LogFile: "network-sandbox.log"}
+	logLevel, privateAddresses := "info", "deny"
+	var entries []string
+	seen := map[string]bool{}
+	for dec.More() {
+		token, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		key := token.(string)
+		if seen[key] {
+			return nil, fmt.Errorf("duplicate key %q", key)
+		}
+		seen[key] = true
+		var target any
+		switch key {
+		case "port":
+			target = &cfg.Port
+		case "logfile":
+			target = &cfg.LogFile
+		case "loglevel":
+			target = &logLevel
+		case "privateaddresses":
+			target = &privateAddresses
+		case "whitelist":
+			target = &entries
+		default:
+			return nil, fmt.Errorf("unknown key %q", key)
+		}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return nil, fmt.Errorf("%s: %w", key, err)
+		}
+		if string(value) == "null" {
+			return nil, fmt.Errorf("%s must not be null", key)
+		}
+		if err := json.Unmarshal(value, target); err != nil {
+			return nil, fmt.Errorf("%s: %w", key, err)
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("unexpected data after config object")
+	}
 	if !seen["port"] {
-		return nil, errors.New("missing required key port in [network-sandbox]")
+		return nil, errors.New("missing required key port")
+	}
+	if cfg.Port == 0 {
+		return nil, errors.New("port must be between 1 and 65535")
+	}
+	if strings.TrimSpace(cfg.LogFile) == "" {
+		return nil, errors.New("logfile is empty")
+	}
+	level, ok := logLevels[strings.ToLower(logLevel)]
+	if !ok {
+		return nil, errors.New("loglevel must be error, warn, info or debug")
+	}
+	cfg.LogLevel = level
+	switch strings.ToLower(privateAddresses) {
+	case "allow":
+		cfg.AllowPrivate = true
+	case "deny":
+	default:
+		return nil, errors.New("privateaddresses must be deny or allow")
+	}
+	wl := newWhitelist()
+	for i, entry := range entries {
+		if err := wl.add(entry); err != nil {
+			return nil, fmt.Errorf("whitelist[%d]: %w", i, err)
+		}
 	}
 	if wl.Len() == 0 {
 		return nil, errors.New("whitelist is empty")
 	}
 	cfg.Whitelist = wl
 	return cfg, nil
-}
-
-// stripComment removes a # or ; comment that starts the line or follows whitespace.
-func stripComment(s string) string {
-	for i := 0; i < len(s); i++ {
-		if (s[i] == '#' || s[i] == ';') && (i == 0 || s[i-1] == ' ' || s[i-1] == '\t') {
-			return s[:i]
-		}
-	}
-	return s
 }

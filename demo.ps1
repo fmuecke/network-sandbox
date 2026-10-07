@@ -21,19 +21,14 @@ if (-not (Test-Path $exe)) { throw "$exe not found - run build.ps1 first" }
 
 $work = Join-Path ([IO.Path]::GetTempPath()) "network-sandbox-manual-$PID"
 New-Item -ItemType Directory $work | Out-Null
-$config = Join-Path $work 'network-sandbox.ini'
+$config = Join-Path $work 'network-sandbox.json'
 $log = Join-Path $work 'network-sandbox.log'
-@"
-[network-sandbox]
-port=$Port
-logfile=$log
-loglevel=info
-
-[whitelist]
-api.anthropic.com:443
-*.githubusercontent.com:443
-example.com:80
-"@ | Set-Content $config
+[ordered]@{
+    port = $Port
+    logfile = $log
+    loglevel = 'info'
+    whitelist = @('api.anthropic.com:443', '*.githubusercontent.com:443', 'example.com:80')
+} | ConvertTo-Json | Set-Content -LiteralPath $config -Encoding utf8NoBOM
 
 $proxy = "http://127.0.0.1:$Port"
 $failures = 0

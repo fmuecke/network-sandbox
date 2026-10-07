@@ -4,91 +4,149 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
 )
 
-// TestParseConfigExample checks that the embedded example config is valid.
 func TestParseConfigExample(t *testing.T) {
-	exampleConfig := string(exampleConfig)
+	if !json.Valid(exampleConfig) {
+		t.Fatal("embedded example is not standard JSON")
+	}
 	for name, input := range map[string]string{
-		"plain":    exampleConfig,
-		"bom":      "\xef\xbb\xbf" + exampleConfig,
-		"crlf":     strings.ReplaceAll(exampleConfig, "\n", "\r\n"),
-		"mixed-cs": strings.Replace(exampleConfig, "[network-sandbox]", "[Network-Sandbox]", 1),
+		"plain": string(exampleConfig),
+		"bom":   "\xef\xbb\xbf" + string(exampleConfig),
+		"crlf":  strings.ReplaceAll(string(exampleConfig), "\n", "\r\n"),
 	} {
-		cfg, err := ParseConfig(strings.NewReader(input))
-		if err != nil {
-			t.Errorf("%s: %v", name, err)
-			continue
-		}
-		if cfg.Port != 8080 || cfg.LogFile != "network-sandbox.log" || cfg.LogLevel != slog.LevelInfo || cfg.AllowPrivate {
-			t.Errorf("%s: got %+v", name, cfg)
-		}
-		if cfg.Whitelist.Len() != 7 {
-			t.Errorf("%s: %d whitelist entries, want 7", name, cfg.Whitelist.Len())
+		t.Run(name, func(t *testing.T) {
+			cfg, err := ParseConfig(strings.NewReader(input))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Port != 8080 || cfg.LogFile != "network-sandbox.log" || cfg.LogLevel != slog.LevelInfo || cfg.AllowPrivate {
+				t.Errorf("got %+v", cfg)
+			}
+			if cfg.Whitelist.Len() != 5 {
+				t.Errorf("%d whitelist entries, want 5", cfg.Whitelist.Len())
+			}
+		})
+	}
+}
+
+func TestParseConfigJSON(t *testing.T) {
+	cfg, err := ParseConfig(strings.NewReader(`{"port":3128,"whitelist":["github.com:443"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Port != 3128 || cfg.LogFile != "network-sandbox.log" || cfg.LogLevel != slog.LevelInfo || cfg.AllowPrivate || cfg.Whitelist.Len() != 1 {
+		t.Fatalf("unexpected config: %+v", cfg)
+	}
+	if _, ok := cfg.Whitelist.Check("github.com", 443); !ok {
+		t.Error("configured host not allowed")
+	}
+	if _, ok := cfg.Whitelist.Check("example.com", 443); ok {
+		t.Error("unconfigured host allowed")
+	}
+}
+
+func TestParseConfigValues(t *testing.T) {
+	input := `{"port":65535,"logfile":"C:\\logs\\a;b#c.log","loglevel":"DEBUG","privateaddresses":"Allow","whitelist":["github.com:443","*.githubusercontent.com:443","127.0.0.1:80","[::1]:443"]}`
+	cfg, err := ParseConfig(strings.NewReader(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Port != 65535 || cfg.LogFile != `C:\logs\a;b#c.log` || cfg.LogLevel != slog.LevelDebug || !cfg.AllowPrivate {
+		t.Errorf("got %+v", cfg)
+	}
+	for host, port := range map[string]uint16{"github.com": 443, "raw.githubusercontent.com": 443, "127.0.0.1": 80, "::1": 443} {
+		if _, ok := cfg.Whitelist.Check(host, port); !ok {
+			t.Errorf("%s:%d not allowed", host, port)
 		}
 	}
 }
 
-func TestParseConfigDefaults(t *testing.T) {
-	cfg, err := ParseConfig(strings.NewReader("[network-sandbox]\nport=3128\n[whitelist]\ngithub.com:443\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.LogFile != "network-sandbox.log" || cfg.LogLevel != slog.LevelInfo {
-		t.Errorf("defaults not applied: %+v", cfg)
+func TestParseConfigLogLevels(t *testing.T) {
+	for name, want := range logLevels {
+		input := fmt.Sprintf(`{"port":8080,"loglevel":%q,"whitelist":["github.com:443"]}`, name)
+		cfg, err := ParseConfig(strings.NewReader(input))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.LogLevel != want {
+			t.Errorf("%s: got %v, want %v", name, cfg.LogLevel, want)
+		}
 	}
 }
 
 func TestParseConfigPrivateAddresses(t *testing.T) {
 	for value, want := range map[string]bool{"allow": true, "Allow": true, "deny": false} {
-		cfg, err := ParseConfig(strings.NewReader("[network-sandbox]\nport=3128\nprivateaddresses=" + value + "\n[whitelist]\ngithub.com:443\n"))
+		input := fmt.Sprintf(`{"port":3128,"privateaddresses":%q,"whitelist":["github.com:443"]}`, value)
+		cfg, err := ParseConfig(strings.NewReader(input))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if cfg.AllowPrivate != want {
-			t.Errorf("privateaddresses=%s: AllowPrivate = %v, want %v", value, cfg.AllowPrivate, want)
+			t.Errorf("privateaddresses=%s: got %v, want %v", value, cfg.AllowPrivate, want)
 		}
 	}
 }
 
 func TestParseConfigErrors(t *testing.T) {
-	const wl = "[whitelist]\ngithub.com:443\n"
 	for name, input := range map[string]string{
-		"missing port":       "[network-sandbox]\n" + wl,
-		"invalid port":       "[network-sandbox]\nport=abc\n" + wl,
-		"port zero":          "[network-sandbox]\nport=0\n" + wl,
-		"port too large":     "[network-sandbox]\nport=65536\n" + wl,
-		"unknown key":        "[network-sandbox]\nport=8080\nlisten=0.0.0.0\n" + wl,
-		"duplicate key":      "[network-sandbox]\nport=8080\nport=8081\n" + wl,
-		"bad loglevel":       "[network-sandbox]\nport=8080\nloglevel=trace\n" + wl,
-		"bad private":        "[network-sandbox]\nport=8080\nprivateaddresses=yes\n" + wl,
-		"empty logfile":      "[network-sandbox]\nport=8080\nlogfile=\n" + wl,
-		"no equals":          "[network-sandbox]\nport 8080\n" + wl,
-		"unknown section":    "[network-sandbox]\nport=8080\n[blacklist]\nevil.com:443\n" + wl,
-		"outside section":    "port=8080\n[network-sandbox]\nport=8080\n" + wl,
-		"empty whitelist":    "[network-sandbox]\nport=8080\n[whitelist]\n# nothing\n",
-		"bad whitelist line": "[network-sandbox]\nport=8080\n[whitelist]\ngithub.com\n",
+		"empty input": ``,
+		"legacy format": `[network-sandbox]
+port=8080
+[whitelist]
+github.com:443`,
+		"not an object":               `[]`,
+		"null object":                 `null`,
+		"missing port":                `{"whitelist":["github.com:443"]}`,
+		"invalid port":                `{"port":"abc","whitelist":["github.com:443"]}`,
+		"port zero":                   `{"port":0,"whitelist":["github.com:443"]}`,
+		"port negative":               `{"port":-1,"whitelist":["github.com:443"]}`,
+		"port too large":              `{"port":65536,"whitelist":["github.com:443"]}`,
+		"port fraction":               `{"port":8080.5,"whitelist":["github.com:443"]}`,
+		"port string":                 `{"port":"8080","whitelist":["github.com:443"]}`,
+		"bad loglevel":                `{"port":8080,"loglevel":"trace","whitelist":["github.com:443"]}`,
+		"bad private":                 `{"port":8080,"privateaddresses":"yes","whitelist":["github.com:443"]}`,
+		"empty logfile":               `{"port":8080,"logfile":"","whitelist":["github.com:443"]}`,
+		"blank logfile":               `{"port":8080,"logfile":" ","whitelist":["github.com:443"]}`,
+		"missing whitelist":           `{"port":8080}`,
+		"empty whitelist":             `{"port":8080,"whitelist":[]}`,
+		"bad whitelist entry":         `{"port":8080,"whitelist":["github.com"]}`,
+		"null whitelist entry":        `{"port":8080,"whitelist":[null]}`,
+		"unknown key":                 `{"port":8080,"listen":"0.0.0.0","whitelist":["github.com:443"]}`,
+		"wrong key case":              `{"Port":8080,"whitelist":["github.com:443"]}`,
+		"mixed key case":              `{"port":8080,"PORT":8081,"whitelist":["github.com:443"]}`,
+		"nested section":              `{"network-sandbox":{"port":8080},"whitelist":["github.com:443"]}`,
+		"comment":                     `{"port":8080,/* comment */"whitelist":["github.com:443"]}`,
+		"trailing comma":              `{"port":8080,"whitelist":["github.com:443"],}`,
+		"truncated":                   `{"port":8080,"whitelist":["github.com:443"]`,
+		"trailing object":             `{"port":8080,"whitelist":["github.com:443"]} {}`,
+		"trailing null":               `{"port":8080,"whitelist":["github.com:443"]} null`,
+		"trailing garbage":            `{"port":8080,"whitelist":["github.com:443"]} garbage`,
+		"null port":                   `{"port":null,"logfile":"network-sandbox.log","loglevel":"info","privateaddresses":"deny","whitelist":["github.com:443"]}`,
+		"wrong type port":             `{"port":true,"logfile":"network-sandbox.log","loglevel":"info","privateaddresses":"deny","whitelist":["github.com:443"]}`,
+		"duplicate port":              `{"port":8080,"logfile":"network-sandbox.log","loglevel":"info","privateaddresses":"deny","whitelist":["github.com:443"],"port":8080}`,
+		"null logfile":                `{"port":8080,"logfile":null,"loglevel":"info","privateaddresses":"deny","whitelist":["github.com:443"]}`,
+		"wrong type logfile":          `{"port":8080,"logfile":true,"loglevel":"info","privateaddresses":"deny","whitelist":["github.com:443"]}`,
+		"duplicate logfile":           `{"port":8080,"logfile":"network-sandbox.log","loglevel":"info","privateaddresses":"deny","whitelist":["github.com:443"],"logfile":"network-sandbox.log"}`,
+		"null loglevel":               `{"port":8080,"logfile":"network-sandbox.log","loglevel":null,"privateaddresses":"deny","whitelist":["github.com:443"]}`,
+		"wrong type loglevel":         `{"port":8080,"logfile":"network-sandbox.log","loglevel":true,"privateaddresses":"deny","whitelist":["github.com:443"]}`,
+		"duplicate loglevel":          `{"port":8080,"logfile":"network-sandbox.log","loglevel":"info","privateaddresses":"deny","whitelist":["github.com:443"],"loglevel":"info"}`,
+		"null privateaddresses":       `{"port":8080,"logfile":"network-sandbox.log","loglevel":"info","privateaddresses":null,"whitelist":["github.com:443"]}`,
+		"wrong type privateaddresses": `{"port":8080,"logfile":"network-sandbox.log","loglevel":"info","privateaddresses":true,"whitelist":["github.com:443"]}`,
+		"duplicate privateaddresses":  `{"port":8080,"logfile":"network-sandbox.log","loglevel":"info","privateaddresses":"deny","whitelist":["github.com:443"],"privateaddresses":"deny"}`,
+		"null whitelist":              `{"port":8080,"logfile":"network-sandbox.log","loglevel":"info","privateaddresses":"deny","whitelist":null}`,
+		"wrong type whitelist":        `{"port":8080,"logfile":"network-sandbox.log","loglevel":"info","privateaddresses":"deny","whitelist":true}`,
+		"duplicate whitelist":         `{"port":8080,"logfile":"network-sandbox.log","loglevel":"info","privateaddresses":"deny","whitelist":["github.com:443"],"whitelist":["github.com:443"]}`,
 	} {
-		if _, err := ParseConfig(strings.NewReader(input)); err == nil {
-			t.Errorf("%s: expected an error", name)
-		}
-	}
-}
-
-func TestStripComment(t *testing.T) {
-	for in, want := range map[string]string{
-		"# comment":              "",
-		"; comment":              "",
-		"port=8080 # comment":    "port=8080 ",
-		"port=8080\t; comment":   "port=8080\t",
-		`logfile=C:\a;b\x#y.log`: `logfile=C:\a;b\x#y.log`,
-		"github.com:443  # note": "github.com:443  ",
-	} {
-		if got := stripComment(in); got != want {
-			t.Errorf("stripComment(%q) = %q, want %q", in, got, want)
-		}
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseConfig(strings.NewReader(input)); err == nil {
+				t.Error("expected an error")
+			}
+		})
 	}
 }
