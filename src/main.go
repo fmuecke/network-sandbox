@@ -40,10 +40,17 @@ of the GNU General Public License version 3+; see LICENSE for details.
 // defaultConfigName is the config file used, next to the exe, without -config.
 const defaultConfigName = "network-sandbox.json"
 
+// inlineConfigName is the file, next to the exe, that holds a -config-json
+// config while its proxy runs in the background. The port identifies it: only
+// one proxy can listen on it.
+func inlineConfigName(port uint16) string {
+	return fmt.Sprintf("network-sandbox.inline-%d.json", port)
+}
+
 const usage = `
 Loopback-only HTTP proxy that forwards requests to allowed hosts only.
 
-Usage: network-sandbox.exe [command] [-config <path>]
+Usage: network-sandbox.exe [command] [-config <path> | -config-json <json>]
 
 Commands:
   (none)    run in the console until Ctrl+C
@@ -58,6 +65,11 @@ Options:
                    If it doesn't exist, an example is created there.
                    Each config has its own proxy: start, stop and restart
                    act on the proxy of this config.
+  -config-json <json>
+                   config as JSON on the command line instead of a file.
+                   In the background, it is stored next to the exe as
+                   network-sandbox.inline-<port>.json until "stop", so
+                   start, stop and restart act on the proxy of that port.
   -help, -?, /?    show this help
 
 Exit codes: 0 success, 1 error, 2 invalid arguments, 3 not running (status)
@@ -86,6 +98,7 @@ func run(args []string, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	flags.Usage = func() { fmt.Fprintln(stderr, "run network-sandbox.exe -help for usage") }
 	configPath := flags.String("config", "", "path to the config file")
+	configJSON := flags.String("config-json", "", "config as JSON")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -96,10 +109,38 @@ func run(args []string, stderr io.Writer) int {
 		flags.Usage()
 		return 2
 	}
-	if command == "status" && *configPath == "" {
+	// An empty value must not fall back to the default config: "stop -config="
+	// would stop another proxy than intended.
+	given := map[string]bool{}
+	flags.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	for name, value := range map[string]string{"config": *configPath, "config-json": *configJSON} {
+		if given[name] && strings.TrimSpace(value) == "" {
+			fmt.Fprintf(stderr, "network-sandbox: -%s is empty\n", name)
+			flags.Usage()
+			return 2
+		}
+	}
+	if given["config"] && given["config-json"] {
+		fmt.Fprintln(stderr, "network-sandbox: use either -config or -config-json")
+		flags.Usage()
+		return 2
+	}
+	if command == "status" && !given["config"] && !given["config-json"] {
 		return statusAll(stderr)
 	}
-	if *configPath == "" {
+	var inline []byte
+	if given["config-json"] {
+		cfg, err := ParseConfig(strings.NewReader(*configJSON))
+		if err != nil {
+			return fail(stderr, fmt.Errorf("-config-json: %w", err))
+		}
+		if command == "" {
+			return serve(cfg, "-config-json", stderr)
+		}
+		inline = []byte(*configJSON)
+		*configPath = filepath.Join(exeDir(), inlineConfigName(cfg.Port))
+	}
+	if !given["config"] && !given["config-json"] {
 		*configPath = filepath.Join(exeDir(), defaultConfigName)
 	}
 	path, err := filepath.Abs(*configPath)
@@ -109,13 +150,17 @@ func run(args []string, stderr io.Writer) int {
 
 	switch command {
 	case "":
-		return serve(path, stderr)
+		cfg, err := loadConfig(path)
+		if err != nil {
+			return fail(stderr, err)
+		}
+		return serve(cfg, path, stderr)
 	case "start":
-		return start(path, stderr)
+		return start(path, inline, stderr)
 	case "stop":
-		return stop(path, stderr)
+		return stop(path, inline, stderr)
 	case "restart":
-		return restart(path, stderr)
+		return restart(path, inline, stderr)
 	case "status":
 		return status(path, stderr)
 	default:
@@ -125,12 +170,9 @@ func run(args []string, stderr io.Writer) int {
 	}
 }
 
-// serve runs the proxy in the foreground until interrupted.
-func serve(configPath string, stderr io.Writer) int {
-	cfg, err := loadConfig(configPath)
-	if err != nil {
-		return fail(stderr, err)
-	}
+// serve runs the proxy in the foreground until interrupted. source names
+// where cfg comes from.
+func serve(cfg *Config, source string, stderr io.Writer) int {
 	logFile, err := openLog(cfg)
 	if err != nil {
 		return fail(stderr, err)
@@ -152,9 +194,9 @@ func serve(configPath string, stderr io.Writer) int {
 
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
-	log.Info("started", "version", version, "listen", ln.Addr().String(), "allowlist_entries", cfg.Allowlist.Len(), "config", configPath)
+	log.Info("started", "version", version, "listen", ln.Addr().String(), "allowlist_entries", cfg.Allowlist.Len(), "config", source)
 	fmt.Fprintf(stderr, "network-sandbox: listening on %s, %d allowlist entries, logging to %s, config is %s\n",
-		ln.Addr(), cfg.Allowlist.Len(), logFile.Name(), configPath)
+		ln.Addr(), cfg.Allowlist.Len(), logFile.Name(), source)
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(newLimitListener(ln, maxConnections, idleTimeout)) }()

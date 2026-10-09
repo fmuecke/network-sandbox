@@ -18,14 +18,8 @@ import (
 // TestBackgroundCommands builds the real executable, because "start" relaunches
 // os.Executable(), which in a test is the test binary.
 func TestBackgroundCommands(t *testing.T) {
-	if testing.Short() {
-		t.Skip("builds the executable")
-	}
-	dir := t.TempDir()
-	exe := filepath.Join(dir, "network-sandbox.exe")
-	if out, err := exec.Command("go", "build", "-o", exe, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, out)
-	}
+	exe := buildExe(t)
+	dir := filepath.Dir(exe)
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -174,6 +168,123 @@ func TestBackgroundCommands(t *testing.T) {
 	expect("stop", 0, "stopped (pid")
 	if _, err := os.Stat(pidFilePath(config) + ".lock"); !os.IsNotExist(err) {
 		t.Error("lock file left behind")
+	}
+}
+
+// buildExe builds the executable into a new directory and returns its path.
+func buildExe(t *testing.T) string {
+	if testing.Short() {
+		t.Skip("builds the executable")
+	}
+	exe := filepath.Join(t.TempDir(), "network-sandbox.exe")
+	if out, err := exec.Command("go", "build", "-o", exe, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build: %v\n%s", err, out)
+	}
+	return exe
+}
+
+// TestBackgroundInlineConfig checks that a -config-json proxy is stored next
+// to the exe while it runs, and that the port identifies it.
+func TestBackgroundInlineConfig(t *testing.T) {
+	exe := buildExe(t)
+	dir := filepath.Dir(exe)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	configJSON := func(allowed string) string {
+		return fmt.Sprintf(`{"port":%d,"logfile":%q,"allowed":[%q]}`, port, filepath.Join(dir, "inline.log"), allowed)
+	}
+	stored := filepath.Join(dir, inlineConfigName(uint16(port)))
+	expect := func(command, config string, wantCode int, wantOut string) {
+		t.Helper()
+		out, err := exec.Command(exe, command, "-config-json", config).CombinedOutput()
+		code := 0
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			code = exitErr.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if code != wantCode || !strings.Contains(string(out), wantOut) {
+			t.Fatalf("%s: exit %d, output %q; want exit %d, output containing %q", command, code, out, wantCode, wantOut)
+		}
+	}
+	t.Cleanup(func() { exec.Command(exe, "stop", "-config-json", configJSON("github.com:443")).Run() })
+
+	expect("start", configJSON("github.com:443"), 0, "started in the background")
+	if data, _ := os.ReadFile(stored); string(data) != configJSON("github.com:443") {
+		t.Errorf("stored config: %q", data)
+	}
+	// Another allowlist on the same port is the same proxy.
+	expect("status", configJSON("example.com:443"), 0, "running (pid")
+	expect("restart", configJSON("example.com:443"), 0, "started in the background")
+	if data, _ := os.ReadFile(stored); string(data) != configJSON("example.com:443") {
+		t.Errorf("stored config after restart: %q", data)
+	}
+	expect("stop", configJSON("example.com:443"), 0, "stopped (pid")
+	for _, path := range []string{stored, pidFilePath(stored)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("%s left behind after stop", path)
+		}
+	}
+
+	// A config of that name that -config-json didn't store is never replaced
+	// or deleted, and its proxy isn't stopped through -config-json.
+	userConfig := configJSON("user.example:443")
+	os.WriteFile(stored, []byte(userConfig), 0o600)
+	expect("start", configJSON("github.com:443"), 1, "didn't store it")
+	expect("stop", configJSON("github.com:443"), 0, "not running")
+	if data, _ := os.ReadFile(stored); string(data) != userConfig {
+		t.Fatalf("user config changed: %q", data)
+	}
+	if out, err := exec.Command(exe, "start", "-config", stored).CombinedOutput(); err != nil {
+		t.Fatalf("start -config: %v\n%s", err, out)
+	}
+	expect("stop", configJSON("github.com:443"), 1, "was started with -config")
+	expect("restart", configJSON("github.com:443"), 1, "was started with -config")
+	if out, err := exec.Command(exe, "stop", "-config", stored).CombinedOutput(); err != nil {
+		t.Fatalf("stop -config: %v\n%s", err, out)
+	}
+	if data, _ := os.ReadFile(stored); string(data) != userConfig {
+		t.Fatalf("user config changed: %q", data)
+	}
+	os.Remove(stored)
+
+	// A config left by a -config-json proxy that is gone is replaced.
+	os.WriteFile(stored, []byte(configJSON("old.example:443")), 0o600)
+	os.WriteFile(pidFilePath(stored), []byte("1 1 "+inlineMarker+"\n"), 0o600)
+	expect("start", configJSON("github.com:443"), 0, "started in the background")
+	expect("stop", configJSON("github.com:443"), 0, "stopped (pid")
+
+	// A start that fails leaves no stored config behind.
+	ln, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	expect("start", configJSON("github.com:443"), 1, "")
+	if _, err := os.Stat(stored); !os.IsNotExist(err) {
+		t.Error("stored config left behind after a failed start")
+	}
+}
+
+func TestInlineConfigArguments(t *testing.T) {
+	var stderr bytes.Buffer
+	if code := run([]string{"-config", "a.json", "-config-json", "{}"}, &stderr); code != 2 {
+		t.Errorf("-config and -config-json: exit %d, %q", code, stderr.String())
+	}
+	// An empty value must not select the default config.
+	for _, args := range [][]string{{"stop", "-config-json="}, {"stop", "-config-json", " "}, {"stop", "-config="}, {"-config-json="}} {
+		stderr.Reset()
+		if code := run(args, &stderr); code != 2 || !strings.Contains(stderr.String(), "is empty") {
+			t.Errorf("%v: exit %d, %q", args, code, stderr.String())
+		}
+	}
+	stderr.Reset()
+	if code := run([]string{"start", "-config-json", `{"port":8080}`}, &stderr); code != 1 || !strings.Contains(stderr.String(), "-config-json: allowlist is empty") {
+		t.Errorf("invalid -config-json: exit %d, %q", code, stderr.String())
 	}
 }
 

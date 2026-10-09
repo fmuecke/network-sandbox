@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.1]
+
+- Added: `-config-json <json>` takes the config on the command line instead of a file. In the
+  background, it is stored as `network-sandbox.inline-<port>.json` next to the exe until `stop`.
+
 ## [0.3.0] - 2026-10-07
 
 - Changed: Configuration uses JSON instead of INI for better compatibility with configuration scripts

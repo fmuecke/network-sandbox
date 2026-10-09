@@ -99,6 +99,10 @@ Validation fails closed. Any of the following prints an error to stderr and exit
 - empty allowlist
 - log file that can't be opened
 
+Instead of a file, `-config-json <json>` passes the same JSON object on the command line, with the same validation. It can't be combined with `-config`. The console proxy writes no file. For `start`, `stop`, `restart` and `status`, the config path is `network-sandbox.inline-<port>.json` next to the executable, which identifies the proxy by its port (§7). `start` writes the JSON there and deletes it again if starting fails; `stop` deletes it along with the PID file.
+
+A file of that name may also be a config someone wrote, so it counts as stored by `-config-json` only if its PID file ends with the marker `inline`. `start` never overwrites any other file of that name, and `stop` never deletes it. `start`, `stop` and `restart` with `-config-json` fail if the proxy's PID file has no marker, because that proxy was started with `-config`. An empty `-config` or `-config-json` is an invalid argument, not the default config.
+
 ## 5. Matching and security rules
 
 - Match the host string the client *requested*, never the IP it resolves to. The proxy resolves DNS through the system resolver, so the agent needs no DNS access.
@@ -122,14 +126,14 @@ Validation fails closed. Any of the following prints an error to stderr and exit
 
 ## 7. Operation
 
-- CLI: `network-sandbox.exe [start|stop|restart|status] [-config <path>]`.
+- CLI: `network-sandbox.exe [start|stop|restart|status] [-config <path> | -config-json <json>]`.
 - `-help`, `-?`, `/?`, `/help` (also `-h`, `--help`, case-insensitive, anywhere on the command line) print usage and exit 0. Invalid arguments print a short hint to `-help` and exit 2.
 - Without a command, it runs in the console. At startup it logs the listen address and the number of allowlist entries. Ctrl+C stops accepting connections, closes open tunnels, and exits.
 - Background mode, without installing a Windows service:
 
   | Command | Behavior |
   |---|---|
-  | `start` | Checks the config, log file and port, then starts a detached copy of itself without a console. Waits until that process listens on the port, and writes its PID and creation time to the PID file. Fails if it's already running. |
+  | `start` | Checks the config, log file and port, then starts a detached copy of itself without a console. Waits until that process listens on the port, and writes its PID and creation time to the PID file, plus the marker `inline` for `-config-json` (§4). Fails if it's already running. |
   | `stop` | Terminates the process that the PID file identifies and deletes the file. Open connections are cut. Succeeds if nothing is running. |
   | `restart` | `stop`, then `start`, as one step. Use it to apply config changes. |
   | `status` | Without `-config`: lists every running proxy as `running (pid <pid>) on <listen address> -config <path>`. It reads the process list, so it includes proxies that run in a console. Exits with 0 if any runs, or 3 if none. With `-config`: prints the same line for that config's background proxy, found through its PID file, and exits with 0 if it runs, or 3 if not. |
@@ -155,7 +159,7 @@ Validation fails closed. Any of the following prints an error to stderr and exit
 These are outside the tool's code, but the setup depends on them:
 
 - Run the proxy as a different user than the agent, one that is allowed outbound traffic.
-- Set ACLs so the agent user can't modify or delete the executable, config, or log files, and can't create files in the config's directory. That directory holds the PID file, which decides what `stop` terminates.
+- Set ACLs so the agent user can't modify or delete the executable, config, or log files, and can't create files in the config's directory. That directory holds the PID file, which decides what `stop` terminates. With `-config-json`, it is the executable's directory.
 - Firewall rules that restrict the agent user to loopback are configured separately.
 
 ### TLS inspection (FortiGate)

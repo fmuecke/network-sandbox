@@ -91,7 +91,7 @@ The proxy refuses to start on unknown or duplicate keys, invalid values, malform
 ## Commands
 
 ```
-network-sandbox.exe [start|stop|restart|status] [-config <path>]
+network-sandbox.exe [start|stop|restart|status] [-config <path> | -config-json <json>]
 ```
 
 | Command | What it does |
@@ -105,6 +105,18 @@ network-sandbox.exe [start|stop|restart|status] [-config <path>]
 `-help`, `-?` or `/?` shows all options. The default config is `network-sandbox.json` next to the exe. The background proxy is recorded in `<config>.pid` next to the config, e.g. `network-sandbox.json.pid`.
 
 Each config has its own proxy, so you can run several side by side on different ports. `start`, `stop` and `restart` act on the proxy of the given config. `status -config <path>` checks only that config's background proxy.
+
+### Config on the command line
+
+`-config-json` takes the config as a JSON string instead of a file, with the same keys and validation:
+
+```powershell
+.\network-sandbox.exe -config-json '{"port":8080,"allowed":["api.anthropic.com:443"]}'
+```
+
+In PowerShell 7.3 or later, single quotes pass the JSON as written. Windows PowerShell 5.1 strips the inner double quotes, so use a config file there.
+
+In the console, no file is written. `start` stores the config as `network-sandbox.inline-<port>.json` next to the exe and `stop` deletes it again. The port identifies the proxy, so `stop`, `status` and `restart` need a `-config-json` with the same port, e.g. `restart` with a changed allowlist.
 
 ## What the agent sees
 
@@ -166,7 +178,7 @@ The proxy contains an agent only together with these:
 - The agent runs as a separate, restricted Windows user.
 - Firewall rules allow that user loopback traffic only.
 - The proxy runs under a different account than the agent.
-- The agent user can't modify the exe, the config or the log files, and can't create files in the config's directory, which holds the PID file.
+- The agent user can't modify the exe, the config or the log files, and can't create files in the config's directory, which holds the PID file. With `-config-json`, that is the exe's directory.
 
 ## Limitations
 

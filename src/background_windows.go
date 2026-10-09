@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"net"
 	"net/netip"
@@ -44,27 +45,33 @@ var (
 	procGetExtendedTcpTable       = syscall.NewLazyDLL("iphlpapi.dll").NewProc("GetExtendedTcpTable")
 )
 
-func start(configPath string, stderr io.Writer) int {
-	return locked(configPath, stderr, startBackground)
+// start, stop and restart take the -config-json config as inline, or nil for
+// a config file. An inline config is stored at configPath while its proxy runs.
+// The file is only ours if the PID file next to it says so (inlineOwned): a
+// file of that name might also be a config that someone wrote.
+
+func start(configPath string, inline []byte, stderr io.Writer) int {
+	return locked(configPath, inline, stderr, func() int { return startBackground(configPath, inline, stderr) })
 }
 
-func stop(configPath string, stderr io.Writer) int {
-	return locked(configPath, stderr, stopBackground)
+func stop(configPath string, inline []byte, stderr io.Writer) int {
+	return locked(configPath, inline, stderr, func() int { return stopBackground(configPath, inline, stderr) })
 }
 
-func restart(configPath string, stderr io.Writer) int {
-	return locked(configPath, stderr, func(configPath string, stderr io.Writer) int {
-		if code := stopBackground(configPath, stderr); code != 0 {
+func restart(configPath string, inline []byte, stderr io.Writer) int {
+	return locked(configPath, inline, stderr, func() int {
+		if code := stopBackground(configPath, inline, stderr); code != 0 {
 			return code
 		}
-		return startBackground(configPath, stderr)
+		return startBackground(configPath, inline, stderr)
 	})
 }
 
 // locked runs a command while no other start, stop or restart of the same
 // config runs. Otherwise two of them could both find no proxy and start one,
-// or act on a PID file that the other is about to replace.
-func locked(configPath string, stderr io.Writer, command func(string, io.Writer) int) int {
+// or act on a PID file that the other is about to replace. With an inline
+// config, it also refuses to act on a proxy that was started with -config.
+func locked(configPath string, inline []byte, stderr io.Writer, command func() int) int {
 	// The lock is a file that is held open without sharing. Windows deletes it
 	// when the handle closes, also if this process dies.
 	lockFile := pidFilePath(configPath) + ".lock"
@@ -78,7 +85,10 @@ func locked(configPath string, stderr io.Writer, command func(string, io.Writer)
 			syscall.FILE_ATTRIBUTE_NORMAL|fileFlagDeleteOnClose, 0)
 		if err == nil {
 			defer syscall.CloseHandle(h)
-			return command(configPath, stderr)
+			if _, err := os.Stat(pidFilePath(configPath)); inline != nil && err == nil && !inlineOwned(configPath) {
+				return fail(stderr, fmt.Errorf("the proxy of %s was started with -config; use -config", configPath))
+			}
+			return command()
 		}
 		if err != errorSharingViolation {
 			return fail(stderr, fmt.Errorf("cannot lock %s: %w", lockFile, err))
@@ -90,7 +100,7 @@ func locked(configPath string, stderr io.Writer, command func(string, io.Writer)
 	}
 }
 
-func startBackground(configPath string, stderr io.Writer) int {
+func startBackground(configPath string, inline []byte, stderr io.Writer) (code int) {
 	running, err := openBackground(configPath, 0)
 	if err != nil {
 		return fail(stderr, err)
@@ -98,6 +108,22 @@ func startBackground(configPath string, stderr io.Writer) int {
 	if running != nil {
 		syscall.CloseHandle(running.process)
 		return fail(stderr, fmt.Errorf("already running (pid %d)", running.pid))
+	}
+	if inline != nil {
+		if inlineOwned(configPath) { // left by a -config-json proxy that is gone
+			os.Remove(configPath)
+			os.Remove(pidFilePath(configPath))
+		}
+		if err := writeNewFile(configPath, inline); errors.Is(err, fs.ErrExist) {
+			return fail(stderr, fmt.Errorf("%s exists, but -config-json didn't store it; use -config, or remove the file", configPath))
+		} else if err != nil {
+			return fail(stderr, err)
+		}
+		defer func() {
+			if code != 0 {
+				os.Remove(configPath)
+			}
+		}()
 	}
 	// Check everything the background process needs here, where errors are
 	// visible; the detached process has no console to report them.
@@ -141,6 +167,9 @@ func startBackground(configPath string, stderr io.Writer) int {
 		return fail(stderr, fmt.Errorf("background process failed to start: %w; run without a command to see why", err))
 	}
 	pidFile := fmt.Sprintf("%d %d\n", cmd.Process.Pid, created)
+	if inline != nil {
+		pidFile = fmt.Sprintf("%d %d %s\n", cmd.Process.Pid, created, inlineMarker)
+	}
 	if err := os.WriteFile(pidFilePath(configPath), []byte(pidFile), 0o600); err != nil {
 		cmd.Process.Kill()
 		return fail(stderr, err)
@@ -175,13 +204,20 @@ func waitListening(pid int, addr string, exited <-chan error) error {
 
 // stopBackground terminates the background process. Stopping one that isn't
 // running succeeds.
-func stopBackground(configPath string, stderr io.Writer) int {
+func stopBackground(configPath string, inline []byte, stderr io.Writer) int {
 	running, err := openBackground(configPath, syscall.PROCESS_TERMINATE)
 	if err != nil {
 		return fail(stderr, err)
 	}
+	owned := inline != nil && inlineOwned(configPath)
+	removeFiles := func() {
+		os.Remove(pidFilePath(configPath))
+		if owned {
+			os.Remove(configPath)
+		}
+	}
 	if running == nil {
-		os.Remove(pidFilePath(configPath)) // stale
+		removeFiles() // stale
 		fmt.Fprintln(stderr, "network-sandbox: not running")
 		return 0
 	}
@@ -189,7 +225,7 @@ func stopBackground(configPath string, stderr io.Writer) int {
 	if err := terminate(running.process); err != nil {
 		return fail(stderr, fmt.Errorf("cannot stop pid %d: %w", running.pid, err))
 	}
-	os.Remove(pidFilePath(configPath))
+	removeFiles()
 	fmt.Fprintf(stderr, "network-sandbox: stopped (pid %d)\n", running.pid)
 	return 0
 }
@@ -308,7 +344,7 @@ func configArg(pid int) string {
 		uintptr(unsafe.Pointer(commandLine)), unsafe.Sizeof(*commandLine), 0); status != 0 || commandLine.text == nil {
 		return ""
 	}
-	// A proxy takes no argument but -config.
+	// A proxy takes no argument but -config or -config-json.
 	if args := commandLineArgs(syscall.UTF16ToString(unsafe.Slice(commandLine.text, commandLine.length/2))); args != "" {
 		return args
 	}
@@ -336,6 +372,17 @@ func commandLineArgs(commandLine string) string {
 // file and none can be mistaken for one.
 func pidFilePath(configPath string) string {
 	return configPath + ".pid"
+}
+
+// inlineMarker ends the PID file of a proxy whose config -config-json stored.
+const inlineMarker = "inline"
+
+// inlineOwned reports whether the config at configPath was stored by
+// -config-json, and so may be replaced or deleted.
+func inlineOwned(configPath string) bool {
+	data, err := os.ReadFile(pidFilePath(configPath))
+	fields := strings.Fields(string(data))
+	return err == nil && len(fields) == 3 && fields[2] == inlineMarker
 }
 
 // background is a running background proxy.
